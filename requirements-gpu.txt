@@ -1,0 +1,14 @@
+# ============================================
+# GPU Acceleration (optional)
+# ============================================
+# Choose ONE depending on your GPU:
+
+# NVIDIA (CUDA):
+# pip uninstall llama-cpp-python -y
+# pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+
+# AMD / Intel / Vulkan:
+# pip uninstall llama-cpp-python -y
+# $env:CMAKE_ARGS="-DGGML_VULKAN=on"  # Windows PowerShell
+# export CMAKE_ARGS="-DGGML_VULKAN=on" # Linux/Mac
+# pip install llama-cpp-python --force-reinstall --no-cache-dir
