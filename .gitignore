@@ -8,6 +8,7 @@ models/
 
 # Entidades (datos generados)
 entitys/
+templates/
 
 # C extensions
 *.so
