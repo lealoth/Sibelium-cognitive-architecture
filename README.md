@@ -24,7 +24,7 @@ Nexus is not a product. She is a demonstration and a companion in the exploratio
 
 ## Architecture Overview
 Sibelium Cognitive Architecture
-├── core/
+├── core/\n
 │ ├── flow/ # Stream of consciousness
 │ │ ├── flow_manager.py # Main orchestrator (dual-tick cycle)
 │ │ ├── flow_stream.py # Thought items with priority decay
