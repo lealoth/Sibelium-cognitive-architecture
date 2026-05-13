@@ -24,36 +24,36 @@ Nexus is not a product. She is a demonstration and a companion in the exploratio
 
 ## Architecture Overview
 Sibelium Cognitive Architecture
-├── core/
-│ ├── flow/ # Stream of consciousness
-│ │ ├── flow_manager.py # Main orchestrator (dual-tick cycle)
-│ │ ├── flow_stream.py # Thought items with priority decay
-│ │ ├── fast_processors.py # Algorithmic cognition (no LLM)
-│ │ ├── reactive_thoughts.py # Micro-reactions to changes
-│ │ ├── thought_satiety.py # Prevents thought over-generation
-│ │ └── pattern_extractor.py # Pattern detection & generalization
-│ ├── cognitive_loop.py # Main orchestrator & post-processing
-│ ├── llm.py # Multi-model management (local + cloud)
-│ ├── memory/
-│ │ ├── episodic_memory.py # ChromaDB for long-term memory
-│ │ ├── self_memory.py # Entity's self-state & evolution
-│ │ ├── user_memory.py # User profile & perception
-│ │ └── scaffolding.py # Cognitive scaffolding for learning
-│ ├── models/
-│ │ └── cognitive_state.py # State data model
-│ └── perception/
-│ ├── file_analyzer.py # Image (BLIP), audio (Whisper), code
-│ ├── time_perception.py # Temporal context
-│ └── user_analysis.py # Intent & emotion extraction
-├── api/
-│ └── server.py # FastAPI endpoints
-├── frontend/ # Vanilla JS web interface
-├── entity_data/
-│ ├── identity/persona.json # Base personality
-│ ├── memory/ # Persistent cognitive state
-│ │ └── users/ # User profile data
-│ └── nexus_world/ # Files for exploration
-└── config.py # All configuration
+- ├── core/
+- │ ├── flow/ # Stream of consciousness
+- │ │ ├── flow_manager.py # Main orchestrator (dual-tick cycle)
+- │ │ ├── flow_stream.py # Thought items with priority decay
+- │ │ ├── fast_processors.py # Algorithmic cognition (no LLM)
+- │ │ ├── reactive_thoughts.py # Micro-reactions to changes
+- │ │ ├── thought_satiety.py # Prevents thought over-generation
+- │ │ └── pattern_extractor.py # Pattern detection & generalization
+- │ ├── cognitive_loop.py # Main orchestrator & post-processing
+- │ ├── llm.py # Multi-model management (local + cloud)
+- │ ├── memory/
+- │ │ ├── episodic_memory.py # ChromaDB for long-term memory
+- │ │ ├── self_memory.py # Entity's self-state & evolution
+- │ │ ├── user_memory.py # User profile & perception
+- │ │ └── scaffolding.py # Cognitive scaffolding for learning
+- │ ├── models/
+- │ │ └── cognitive_state.py # State data model
+- │ └── perception/
+- │ ├── file_analyzer.py # Image (BLIP), audio (Whisper), code
+- │ ├── time_perception.py # Temporal context
+- │ └── user_analysis.py # Intent & emotion extraction
+- ├── api/
+- │ └── server.py # FastAPI endpoints
+- ├── frontend/ # Vanilla JS web interface
+- ├── entity_data/
+- │ ├── identity/persona.json # Base personality
+- │ ├── memory/ # Persistent cognitive state
+- │ │ └── users/ # User profile data
+- │ └── nexus_world/ # Files for exploration
+- └── config.py # All configuration
 
 ---
 
