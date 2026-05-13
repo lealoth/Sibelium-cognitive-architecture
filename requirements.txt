@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+llama-cpp-python
+chromadb
+pydantic
+Pillow
+torch
+torchvision
+transformers
+openai-whisper
+ddgs
+requests
+PyPDF2
+python-multipart
