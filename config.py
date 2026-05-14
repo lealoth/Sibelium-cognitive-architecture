@@ -74,3 +74,8 @@ PROACTIVE_MESSAGES_ENABLED = False
 PROACTIVE_COOLDOWN_MINUTES = 120  # Minutos mínimos desde el último mensaje del usuario
 PROACTIVE_QUIET_HOURS_START = 22  # Hora en que deja de enviar mensajes (22 = 10 PM)
 PROACTIVE_QUIET_HOURS_END = 8     # Hora en que vuelve a enviar mensajes (8 = 8 AM)
+
+# Mods activos
+ENABLED_MODS = ["self_engineer"]  # ["self_engineer"] para activar
+# ENABLED_MODS_NEXUS = ["director", "team_channel", "self_engineer"]
+# ENABLED_MODS_ADA = ["team_channel", "self_engineer"]
