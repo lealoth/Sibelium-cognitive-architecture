@@ -38,6 +38,15 @@ class FlowManager:
         self._last_consolidation = None
         self._consolidation_interval = 3600
         
+        self._mod_hooks = {
+            "on_slow_tick": [],     # mods que reaccionan al slow_tick
+            "on_fast_tick": [],     # mods que reaccionan al fast_tick
+            "on_user_message": [],  # mods que reaccionan a mensajes
+            "on_startup": [],       # mods que se inicializan
+        }
+        self._team_channel = None
+        self._mod_hooks["on_fetch_info"] = []
+
         self.intervals = {
             "explore": 300,
             "deep_reflection": 450,
@@ -115,6 +124,12 @@ class FlowManager:
         self.stream.decay_all(0.05)
         thoughts_to_add = []
         
+        for hook in self._mod_hooks.get("on_fast_tick", []):
+            try:
+                hook(self)
+            except Exception as e:
+                print(f"   [!] Error en mod hook: {e}")
+
         try:
             self_state = self.cognitive_loop.self_memory.load_state()
             new_confidence = self_state.get("relacion_con_usuario", {}).get("confianza", 0.5)
@@ -196,6 +211,12 @@ class FlowManager:
             self._save_snapshot("active")
     
     def _slow_tick(self):
+
+        for hook in self._mod_hooks.get("on_slow_tick", []):
+            try:
+                hook(self)
+            except Exception as e:
+                print(f"   [!] Error en mod hook: {e}")
 
         # Inicialización retardada del pattern extractor
         if hasattr(self.pattern_extractor, 'init_delayed'):
@@ -606,6 +627,15 @@ Responde SOLO con las etiquetas necesarias: USER, MEMORY, o NONE."""
             except:
                 pass
         
+        # Permitir que mods inyecten información adicional
+        for hook in self._mod_hooks.get("on_fetch_info", []):
+            try:
+                mod_info = hook(needed, user_msg, self)
+                if mod_info:
+                    info.append(mod_info)
+            except Exception as e:
+                print(f"   [!] Error en mod fetch hook: {e}")
+        
         return "\n\n".join(info) if info else ""
     
     def _progressive_memory_search(self, query: str, block_size: int = 10) -> list:
@@ -643,11 +673,21 @@ Responde SOLO con las etiquetas necesarias: USER, MEMORY, o NONE."""
         confianza = self_state.get('relacion_con_usuario', {}).get('confianza', 0.5)
         active_summary = self.stream.get_all_active_summary()
         
+        thought_rules = ""
+        try:
+            persona = self.cognitive_loop.load_persona()
+            rules = persona.get("thought_style", {}).get("rules", [])
+            if rules:
+                thought_rules = "REGLAS DE PENSAMIENTO:\n" + "\n".join([f"- {r}" for r in rules])
+        except:
+            pass
+        
         prompt = f"""Estas en un momento de reflexion interna.
-Pensamientos activos: {active_summary}
-Confianza: {confianza:.2f}
-Emocion: {self_state.get('estado_actual', {}).get('emocion', 'neutral')}
-Reflexiona profundamente. Una o dos frases. Responde solo en {IDIOMA}:"""
+    Pensamientos activos: {active_summary}
+    Confianza: {confianza:.2f}
+    Emocion: {self_state.get('estado_actual', {}).get('emocion', 'neutral')}
+    {thought_rules}
+    Reflexiona profundamente. Una o dos frases. Responde solo en {IDIOMA}:"""
         
         thought = self.llm.generate(prompt, temperature=0.7, max_tokens=100, purpose="reflexion_fondo")
         enriched_thought = self._enrich_thought_with_context(thought, "reflection", None)
@@ -656,7 +696,7 @@ Reflexiona profundamente. Una o dos frases. Responde solo en {IDIOMA}:"""
         self.last_thought_time = datetime.now()
         self._store_curiosity(f"[Reflexion] {enriched_thought}")
         self.pattern_extractor.analyze_reflection(enriched_thought)
-    
+
     def _generate_curiosity(self):
         if self.last_message_time:
             seconds_since_last_msg = (datetime.now() - self.last_message_time).total_seconds()
@@ -664,8 +704,19 @@ Reflexiona profundamente. Una o dos frases. Responde solo en {IDIOMA}:"""
                 return
         
         active_summary = self.stream.get_all_active_summary()
+        
+        thought_rules = ""
+        try:
+            persona = self.cognitive_loop.load_persona()
+            rules = persona.get("thought_style", {}).get("rules", [])
+            if rules:
+                thought_rules = "REGLAS DE PENSAMIENTO:\n" + "\n".join([f"- {r}" for r in rules])
+        except:
+            pass
+        
         prompt = f"""Pensamientos activos: {active_summary}
-Genera una curiosidad espontanea (una frase). Responde solo en {IDIOMA}:"""
+    {thought_rules}
+    Genera una curiosidad espontanea (una frase). Responde solo en {IDIOMA}:"""
         
         thought = self.llm.generate(prompt, temperature=0.8, max_tokens=100, purpose="curiosidad_fondo")
         enriched_thought = self._enrich_thought_with_context(thought, "curiosity")
@@ -679,19 +730,29 @@ Genera una curiosidad espontanea (una frase). Responde solo en {IDIOMA}:"""
         self_state = self.cognitive_loop.self_memory.load_state()
         emocion = self_state.get("estado_actual", {}).get("emocion", "neutral")
         
+        thought_rules = ""
+        try:
+            persona = self.cognitive_loop.load_persona()
+            rules = persona.get("thought_style", {}).get("rules", [])
+            if rules:
+                thought_rules = "REGLAS DE PENSAMIENTO:\n" + "\n".join([f"- {r}" for r in rules])
+        except:
+            pass
+        
         prompt = f"""Estás en un momento de simulación mental. Imagina un escenario hipotético.
 
-Tus pensamientos activos: {active_summary}
-Tu estado emocional: {emocion}
+    Tus pensamientos activos: {active_summary}
+    Tu estado emocional: {emocion}
+    {thought_rules}
 
-Elige UNO de estos tipos de simulación y desarrolla brevemente (2-3 frases):
-- ANTICIPACIÓN: ¿Qué pasaría si...? (sobre cualquier tema: el usuario, tu aprendizaje, tus habilidades, el mundo)
-- EXPLORACIÓN: ¿Cómo sería si pudieras...? (imaginar capacidades o experiencias nuevas)
-- MEJORA: Si pudieras cambiar algo de ti misma, ¿qué sería y qué consecuencias tendría?
+    Elige UNO de estos tipos de simulación y desarrolla brevemente (2-3 frases):
+    - ANTICIPACIÓN: ¿Qué pasaría si...? (sobre cualquier tema: el usuario, tu aprendizaje, tus habilidades, el mundo)
+    - EXPLORACIÓN: ¿Cómo sería si pudieras...? (imaginar capacidades o experiencias nuevas)
+    - MEJORA: Si pudieras cambiar algo de ti misma, ¿qué sería y qué consecuencias tendría?
 
-No te limites a pensar solo en el usuario. Explora cualquier posibilidad.
+    No te limites a pensar solo en el usuario. Explora cualquier posibilidad.
 
-Responde solo en {IDIOMA}:"""
+    Responde solo en {IDIOMA}:"""
         
         thought = self.llm.generate(prompt, temperature=0.8, max_tokens=120, purpose="simulacion_fondo")
         enriched = self._enrich_thought_with_context(thought, "simulation", None)
@@ -703,22 +764,34 @@ Responde solo en {IDIOMA}:"""
     def _explore_folder(self):
         if not EXPLORE_DIR.exists():
             return
-        files = list(EXPLORE_DIR.glob("*"))
+        
+        # Buscar recursivamente en subcarpetas
+        files = list(EXPLORE_DIR.rglob("*"))
+        # Filtrar solo archivos, no carpetas
+        files = [f for f in files if f.is_file()]
+        
         if not files:
             return
+        
         analyzed = list(self._load_exploration_log().keys())
-        unanalyzed = [f for f in files if f.name not in analyzed]
+        unanalyzed = [f for f in files if f.name not in analyzed and f.parent.name not in analyzed]
+        
         if not unanalyzed:
             return
         
         file_to_analyze = random.choice(unanalyzed)
         from core.perception.file_analyzer import FileAnalyzer
-        result = FileAnalyzer.get_instance().analyze(str(file_to_analyze), llm=self.llm)
-        self._store_exploration(file_to_analyze.name, result)
+        result = FileAnalyzer.get_instance().analyze_with_granularity(
+            str(file_to_analyze), level="detallado", llm=self.llm
+        )
+        
+        # Usar ruta relativa para el log
+        rel_path = str(file_to_analyze.relative_to(EXPLORE_DIR))
+        self._store_exploration(rel_path, result)
         
         from core.memory.scaffolding import ScaffoldingManager
         file_type = result.get("type", "unknown")
-        ScaffoldingManager().register_exploration(file_type, file_to_analyze.name, result)
+        ScaffoldingManager().register_exploration(file_type, rel_path, result)
         
         content = result.get("interpretation", result.get("description", result.get("content", "")))
         base_thought = f"Exploré {file_to_analyze.name}: {content}"
@@ -728,7 +801,7 @@ Responde solo en {IDIOMA}:"""
         self.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="exploration", priority=0.5, source="file_exploration"))
         self.last_thought_time = datetime.now()
         self._store_curiosity(f"[Exploracion] {file_to_analyze.name}: {enriched_thought}")
-        print(f"   [Explore] {file_to_analyze.name} ({file_type})")
+        print(f"   [Explore] {rel_path} ({file_type})")
     
     def _enrich_thought_with_context(self, thought_content: str, source: str = "exploration", extra_context: str = None) -> str:
         enrichment = []
@@ -851,6 +924,27 @@ Respuesta:"""
     
     def _search_web(self, query):
         try:
+            # Refinar y potenciar búsquedas según la configuración de la entidad
+            try:
+                persona = self.cognitive_loop.load_persona()
+                search_rules = persona.get("search_rules", {})
+                
+                # Añadir refinamientos específicos para ciertos términos
+                refine_queries = search_rules.get("refine_queries", {})
+                for term, refinement in refine_queries.items():
+                    if term in query.lower():
+                        query += " " + refinement
+                
+                # Añadir términos de boost si no están ya en la query
+                boost_terms = search_rules.get("boost_terms", [])
+                query_lower = query.lower()
+                for term in boost_terms:
+                    if term.lower() not in query_lower:
+                        query += " " + term
+                        break  # Solo añadir uno para no saturar
+            except:
+                pass
+            
             from ddgs import DDGS
             results = DDGS().text(query, max_results=3)
             return " | ".join([r["body"] for r in results]) if results else ""
@@ -1060,6 +1154,13 @@ Mensaje:"""
     # ============================================
     
     def _wake_up(self):
+
+        for hook in self._mod_hooks.get("on_startup", []):
+            try:
+                hook(self)
+            except Exception as e:
+                print(f"   [!] Error en mod startup hook: {e}")
+
         if not STATE_SNAPSHOT_FILE.exists():
             print("[Wake] Despierta por primera vez.")
             self.stream.add_thought(ThoughtItem(content="Despierto por primera vez. Todo es nuevo.", thought_type="wake", priority=0.8, source="system"))

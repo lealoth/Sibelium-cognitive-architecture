@@ -3,10 +3,7 @@ Determina cuánto apoyo necesita la Entidad para generar pensamiento crítico.""
 import json
 from pathlib import Path
 from datetime import datetime
-from config import BASE_DIR
-
-SCAFFOLDING_FILE = BASE_DIR / "data" / "memory" / "scaffolding.json"
-
+from config import SCAFFOLDING_FILE
 
 class ScaffoldingManager:
     def __init__(self):

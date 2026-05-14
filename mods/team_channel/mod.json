@@ -1,0 +1,11 @@
+{
+  "name": "Team Channel",
+  "version": "1.0.0",
+  "description": "Inter-entity communication channel. Allows entities to send messages, proposals, and feedback to each other.",
+  "author": "Sibelium",
+  "dependencies": [],
+  "permissions": ["read_write"],
+  "config": {
+    "check_interval_seconds": 1800
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "Director",
+  "version": "1.0.0",
+  "description": "Enables an entity to act as a director/manager, receiving proposals from other entities and evaluating them against a core mission.",
+  "author": "Sibelium",
+  "dependencies": ["team_channel"],
+  "permissions": ["read_write"],
+  "config": {
+    "check_interval_seconds": 1800
+  }
+}

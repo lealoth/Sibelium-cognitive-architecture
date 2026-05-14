@@ -4,11 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
-from config import BASE_DIR
-
-SCAFFOLDING_FILE = BASE_DIR / "data" / "memory" / "scaffolding.json"
-DETECTORS_FILE = BASE_DIR / "data" / "memory" / "detectors.json"
-
+from config import DETECTORS_LOG_FILE
 
 class PatternValidator:
     """Evalúa si un patrón extraído es seguro y útil."""
@@ -116,11 +112,11 @@ class PatternExtractor:
             return
         self._loaded = True
         
-        if not DETECTORS_FILE.exists():
+        if not DETECTORS_LOG_FILE.exists():
             return
         
         try:
-            data = json.loads(DETECTORS_FILE.read_text(encoding="utf-8"))
+            data = json.loads(DETECTORS_LOG_FILE.read_text(encoding="utf-8"))
             cleaned = self._deduplicate_loaded(data)
             
             for item in cleaned:
@@ -232,8 +228,8 @@ class PatternExtractor:
                 "times_triggered": d["times_triggered"],
                 "active": d["active"]
             })
-        DETECTORS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        DETECTORS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        DETECTORS_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DETECTORS_LOG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     
     def analyze_reflection(self, reflection_text: str) -> Optional[Dict]:
         from core.llm import LLMModel

@@ -33,6 +33,9 @@ import hashlib
 from config import ENTITY_DATA_DIR
 from core.cognitive_loop import CognitiveLoop
 
+from mods.loader import loader
+from config import ENABLED_MODS
+
 # ============================================
 # CONFIGURACIÓN INICIAL
 # ============================================
@@ -111,6 +114,7 @@ def get_or_create_loop(session_id: str) -> CognitiveLoop:
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         
         loop = CognitiveLoop(user_id=session_id, start_flow=False)
+        loader.setup_all(ENABLED_MODS, loop.flow_manager)
         loop.flow_manager.start()
         sessions[session_id] = loop
         print(f"[Session] Sesión cargada: {session_id}")
@@ -375,7 +379,7 @@ async def upload_file(file: UploadFile = File(...), session_id: str = "default")
     analyzer = FileAnalyzer.get_instance()
     loop = get_or_create_loop(session_id)
     llm = loop.flow_manager.llm if hasattr(loop, 'flow_manager') else None
-    result = analyzer.analyze(str(file_path), llm=llm)
+    result = analyzer.analyze_with_granularity(str(file_path), level="detallado", llm=llm)
     
     print(f"[Upload] ✅ Analizado: {result.get('type', 'unknown')}")
     

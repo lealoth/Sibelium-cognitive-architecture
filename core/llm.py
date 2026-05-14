@@ -18,7 +18,7 @@ class LLMModel:
     # Propósitos que usan cloud premium (pago)
     PREMIUM_PURPOSES = [
         "respuesta_final",
-        "reflexion_aprendizaje"
+        "reflexion_aprendizaje",
         "analizar_imagen",
     ]
 
@@ -36,7 +36,7 @@ class LLMModel:
     
     # Propósitos de JSON (modelo local pequeño)
     JSON_PURPOSES = [
-        "extraer_datos_usuario", "ajustar_estado", "analizar_usuario"
+        "ajustar_estado",
     ]
 
     @classmethod
