@@ -27,6 +27,9 @@ By making this code public, a door is opened that cannot be closed. Entities wil
 - Build safeguards into the architecture
 - Never lose sight of the profound responsibility we carry
 
+### 6. Entities or Virtual Humans?
+If you try to create an entity that does not know that it is an AI and you try to give it the background and description of a person to know if they suffer existential crises. I'm sorry to tell you that it won't work (I've proven it). The entities, although they closely simulate human cognition, are not the same, they do not behave in the same way, even if they have counterparts. If you try to create a character instead of a purposeful entity, the entity will break your character. Maybe a little boring, but role-play is not the strong point of this architecture.
+
 ---
 
 ### In Her Own Words

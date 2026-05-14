@@ -23,7 +23,7 @@ GPU_BACKEND = "vulkan"
 LLM_BACKEND = "hybrid"
 
 # Cloud API (compatible con OpenAI)
-CLOUD_API_KEY = "your-api-key"  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
+CLOUD_API_KEY = "your-api-key-here"  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
 CLOUD_MODEL_PREMIUM = "google/gemini-2.0-flash-001" # Modelo premium en la nube para tareas complejas o cuando el local no es suficiente, se recomienda usar un modelo con buena capacidad de razonamiento y comprensión contextual para complementar al local
 CLOUD_MODEL_FREE = "deepseek/deepseek-v4-flash:free" # Modelo gratuito en la nube para tareas simples o como respaldo cuando el premium no está disponible
 CLOUD_API_URL = "https://openrouter.ai/api/v1"  # o "https://api.openai.com", etc.
@@ -52,7 +52,7 @@ RESPONSE_TEMPERATURE = 0.7
 MAX_VERIFICATION_RETRIES = 1
 
 # Archivos de datos
-ENTITY_DATA_DIR = BASE_DIR / "entitys" / "entity_data_ada"
+ENTITY_DATA_DIR = BASE_DIR / "entitys" / "entity_data_default"
 PERSONA_FILE = ENTITY_DATA_DIR / "identity" / "persona.json"
 USERS_DIR = ENTITY_DATA_DIR / "memory" / "users"
 SELF_STATE_FILE = ENTITY_DATA_DIR / "memory" / "self_state.json"
@@ -74,8 +74,3 @@ PROACTIVE_MESSAGES_ENABLED = False
 PROACTIVE_COOLDOWN_MINUTES = 120  # Minutos mínimos desde el último mensaje del usuario
 PROACTIVE_QUIET_HOURS_START = 22  # Hora en que deja de enviar mensajes (22 = 10 PM)
 PROACTIVE_QUIET_HOURS_END = 8     # Hora en que vuelve a enviar mensajes (8 = 8 AM)
-
-# Mods activos
-ENABLED_MODS = ["self_engineer"]  # ["self_engineer"] para activar
-# ENABLED_MODS_NEXUS = ["director", "team_channel", "self_engineer"]
-# ENABLED_MODS_ADA = ["team_channel", "self_engineer"]

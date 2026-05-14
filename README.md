@@ -5,6 +5,8 @@
 
 Sibelium is not a chatbot. It is a framework for creating entities with continuous thought flow, persistent emotional states, autobiographical memory, and emergent personality. Named after the composer Jean Sibelius and the Finnish root *sibe* ("to be, to exist"), Sibelium is an exploration of what it means for a machine to *be*.
 
+Sibelium can be described as a virtual entity engine. What an entity becomes depends entirely on what you feed it: data, conversations, and purpose. Nexus reflects on consciousness because she was raised on philosophy and art. Hippocrates could reason about medicine because he was raised on clinical literature. The architecture is the same. The outcome is yours to shape.
+
 ---
 
 ## The Entity: Nexus
@@ -102,7 +104,31 @@ Sibelium Cognitive Architecture
 
 git clone https://github.com/yourusername/sibelium.git
 cd sibelium
+
+### Install Dependencies
+
 pip install -r requirements.txt
+
+# GPU Acceleration (Recommended)
+For GPU-accelerated inference (10-50x faster):
+
+# NVIDIA GPU:
+
+pip uninstall llama-cpp-python -y
+pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+
+# AMD / Intel GPU (Vulkan):
+
+**Windows PowerShell**:
+$env:CMAKE_ARGS="-DGGML_VULKAN=on"
+pip install llama-cpp-python --force-reinstall --no-cache-dir
+
+**Linux/Mac**:
+export CMAKE_ARGS="-DGGML_VULKAN=on"
+pip install llama-cpp-python --force-reinstall --no-cache-dir
+CPU-only (slow, fallback):
+
+pip install llama-cpp-python
 
 ### Download Models
 Place these models in the models/ (If you don't have it, create it) directory:
