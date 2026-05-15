@@ -3,6 +3,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from collections import deque
 import json
 from config import (
     MODEL_PATH, MODEL_CONTEXT_SIZE, MODEL_THREADS, MODEL_GPU_LAYERS,
@@ -20,13 +21,14 @@ class LLMModel:
         "respuesta_final",
         "reflexion_aprendizaje",
         "analizar_imagen",
+        "generar_respuesta"
     ]
 
     # Propósitos que usan cloud gratuito
     CLOUD_FREE_PURPOSES = [
         "interpretar", "evaluar", "decidir",
         "pensamiento_interpretar", "pensamiento_evaluar", "pensamiento_decidir",
-        "decidir_info", "percepcion_usuario"
+        "decidir_info", "percepcion_usuario", "verificar_respuesta"
     ]
 
     # Propósitos de razonamiento ligero (modelo local pequeño)
@@ -42,7 +44,9 @@ class LLMModel:
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def __init__(self):
@@ -54,7 +58,7 @@ class LLMModel:
         self.model_reasoning = None
         self.model_json = None
         self.backend = LLM_BACKEND
-        self.call_log = []
+        self.call_log = deque(maxlen=100)
         COGNITIVE_TRACE_FILE.parent.mkdir(parents=True, exist_ok=True)
         
         if self.backend in ("local", "hybrid"):
@@ -145,22 +149,19 @@ class LLMModel:
     
     def generate(self, prompt, temperature=0.7, max_tokens=150, purpose=None):
         t_start = time.time()
-        
         backend = self._select_backend(purpose)
         
-        # Solo necesitamos lock para modelos locales
-        if backend in ("main", "reasoning", "json"):
-            # Esperar a que el modelo esté libre
-            with LLMModel._lock:
-                return self._generate_locked(prompt, temperature, max_tokens, purpose, backend, t_start)
-        else:
-            # Cloud no necesita lock
+        with LLMModel._lock:
             return self._generate_locked(prompt, temperature, max_tokens, purpose, backend, t_start)
 
     def _generate_locked(self, prompt, temperature, max_tokens, purpose, backend, t_start):
         """Generación real dentro del lock."""
         print(f"🤖 LLM generate [{backend}] - purpose: {purpose}, max_tokens: {max_tokens}")
-        
+        if backend == "main" and purpose == "respuesta_final":
+            result = self._generate_local_fallback(prompt, temperature, max_tokens, purpose)
+            if result:
+                return result
+            
         response = None
         
         if backend == "cloud_premium":
@@ -337,3 +338,24 @@ class LLMModel:
             else:
                 lines.append(f"- [{timestamp}] [{backend}] {purpose} ({elapsed}s)")
         return "\n".join(lines) if lines else "Sin actividad registrada aún."
+    
+    def _generate_local_fallback(self, prompt: str, temperature: float, max_tokens: int, purpose: str = "respuesta_final") -> str:
+        """Plan B cuando el cloud no está disponible. 2 llamadas: generar + verificar."""
+        try:
+            response_text = self._generate_local(prompt, temperature, max_tokens, purpose)
+            
+            if not response_text:
+                return ""
+            
+            verification_prompt = f"""Evalúa si esta respuesta es coherente y precisa:
+    Respuesta: "{response_text[:300]}"
+    Responde SOLO SI o NO."""
+            
+            verification = self._generate_local(verification_prompt, 0.0, 3, "verificar_respuesta")
+            
+            if "NO" in verification.upper():
+                return response_text + " (⚠️ verificación fallida)"
+            
+            return response_text
+        except Exception:
+            return response_text if response_text else ""

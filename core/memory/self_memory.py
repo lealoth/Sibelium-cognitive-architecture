@@ -34,10 +34,6 @@ class SelfMemory:
 
     def save_state(self, state):
         self.path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def adjust_state(self, user_message: str, assistant_response: str):
-        state = self.load_state()
-        lower = user_message.lower()
         
     def adjust_state(self, user_message: str, assistant_response: str):
         state = self.load_state()
@@ -61,9 +57,9 @@ JSON:"""
             llm = LLMModel.get_instance()
             result = llm.generate(prompt, temperature=0.3, max_tokens=80, purpose="ajustar_estado")
             
-            import re as _re
+            import re
             import json
-            json_match = _re.search(r'\{.*\}', result, _re.DOTALL)
+            json_match = re.search(r'\{.*\}', result, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
                 

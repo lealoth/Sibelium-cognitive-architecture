@@ -105,6 +105,13 @@ class PatternExtractor:
         self.validator = PatternValidator()
         self._loaded = False
         self._initialized = False
+
+        self.pattern_intervals = {
+            "anomalia": 30,        # Cada 30 segundos
+            "correccion": 15,      # Cada 15 segundos
+            "default": 600         # El resto, 10 minutos
+        }
+        self._last_pattern_check = {}
     
     def _load_detectors(self):
         """Carga detectores desde disco. Solo se ejecuta una vez."""
@@ -188,33 +195,33 @@ class PatternExtractor:
         return cleaned
 
     def _is_duplicate(self, condition_text: str) -> bool:
-        """Verifica si ya existe un detector semánticamente similar mediante LLM."""
         if not self.active_detectors:
             return False
         
         from core.llm import LLMModel
         llm = LLMModel.get_instance()
         
-        # Solo verificar contra los detectores más recientes (máximo 5)
-        recent_detectors = self.active_detectors[-5:]
+        recent = self.active_detectors[-5:]
         
-        for detector in recent_detectors:
-            prompt = f"""¿Estos dos patrones detectan esencialmente lo mismo?
-
-    Patrón existente: "{detector.get('condition_text', '')[:150]}"
-    Patrón nuevo: "{condition_text[:150]}"
-
-    ¿Son redundantes?
-    Responde SOLO SI o NO."""
-            
-            try:
-                result = llm.generate(prompt, temperature=0.1, max_tokens=3, purpose="verificar_duplicado")
-                if "SI" in result.upper():
-                    return True
-            except:
-                continue
+        conditions = "\n".join([
+            f"{i+1}. {d.get('condition_text', '')[:120]}"
+            for i, d in enumerate(recent)
+        ])
         
-        return False
+        prompt = f"""¿Alguno de estos detectores es funcionalmente redundante con este nuevo?
+
+    Nuevo: "{condition_text[:150]}"
+
+    Existentes:
+    {conditions}
+
+    Responde SOLO SI (si alguno es redundante) o NO (si ninguno lo es)."""
+        
+        try:
+            result = llm.generate(prompt, temperature=0.1, max_tokens=3, purpose="verificar_duplicado")
+            return "SI" in result.upper()
+        except:
+            return False
 
     
     def _save_detectors(self):
@@ -428,16 +435,49 @@ Código corregido:"""
         
         return indices
 
-
     def check_all(self, context: Dict) -> list:
-        """Evalúa los detectores activos y en prueba."""
-        # Si hay 10 o más detectores, usar procesamiento por lotes
-        if len([d for d in self.active_detectors if d.get("active")]) >= 10:
+        """Evalúa los detectores activos y en prueba, con intervalos por tipo."""
+        now = datetime.now()
+        
+        if not hasattr(self, 'pattern_intervals'):
+            self.pattern_intervals = {
+                "correccion": 30,
+                "anomalia": 30,
+                "believe_update": 15,
+                "default": 600
+            }
+        
+        if not hasattr(self, '_last_pattern_check'):
+            self._last_pattern_check = {}
+        
+        # Guardar detectores originales
+        original_detectors = self.active_detectors
+        
+        # Filtrar por intervalo
+        due_detectors = []
+        for detector in original_detectors:
+            if not detector.get("active"):
+                continue
+            pattern_type = detector.get("pattern_type", "default")
+            interval = self.pattern_intervals.get(pattern_type, 600)
+            detector_id = detector.get("id", detector.get("condition_text", "")[:30])
+            last_check = self._last_pattern_check.get(detector_id)
+            
+            if last_check is None or (now - last_check).total_seconds() >= interval:
+                self._last_pattern_check[detector_id] = now
+                due_detectors.append(detector)
+        
+        # Sustituir temporalmente para usar métodos existentes
+        self.active_detectors = due_detectors
+        
+        if len(due_detectors) >= 10:
             thoughts = self.check_all_batch(context)
         else:
             thoughts = self._check_all_individual(context)
         
-        # Procesar trials (siempre, independientemente del método)
+        # Restaurar
+        self.active_detectors = original_detectors
+        
         thoughts.extend(self._check_trials(context))
         
         return thoughts
@@ -578,3 +618,18 @@ Código corregido:"""
         self._detector_rotation_index = (self._detector_rotation_index + batch_size) % len(active)
         
         return [active[i] for i in indices]
+    
+    def decay_detectors(self, max_detectors: int = 30):
+        """Mantiene solo los detectores más usados. Poda sináptica."""
+        if len(self.active_detectors) <= max_detectors:
+            return
+        
+        # Ordenar por veces activado (descendente)
+        self.active_detectors.sort(key=lambda d: d.get("times_triggered", 0), reverse=True)
+        
+        # Mantener solo los primeros max_detectors
+        removed = self.active_detectors[max_detectors:]
+        self.active_detectors = self.active_detectors[:max_detectors]
+        
+        self._save_detectors()
+        print(f"   [Pattern] Poda sináptica: {len(removed)} detectores eliminados. {len(self.active_detectors)} restantes.")

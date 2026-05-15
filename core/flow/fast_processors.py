@@ -1,5 +1,5 @@
 """Procesos cognitivos algorítmicos que no requieren LLM."""
-from typing import List, Tuple, Optional
+from typing import List
 
 
 class FastCognitiveProcessors:

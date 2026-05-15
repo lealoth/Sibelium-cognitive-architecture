@@ -306,3 +306,10 @@ Número:"""
             "user_present": self.user_present,
             "active_thoughts": [t.to_dict() for t in self.active[:10]]
         }
+    
+    def suppress_topic(self, topic: str, reduction: float = 0.9):
+        """Reduce la prioridad de pensamientos sobre un tema corregido."""
+        topic_lower = topic.lower()
+        for thought in self.thoughts:
+            if topic_lower in thought.content.lower():
+                thought.priority *= (1 - reduction)

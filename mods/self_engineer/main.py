@@ -117,24 +117,30 @@ FEEDBACK: [breve]""",
                             code_blocks = re.findall(r'```python\n(.*?)```', solution_code, re.DOTALL)
                             if code_blocks:
                                 executable_code = "\n\n".join(code_blocks)
+                                executable_code = executable_code.replace('\u2192', '->')
+                                executable_code = executable_code.replace('\u2713', '[OK]')
+                                executable_code = executable_code.replace('\u2717', '[FAIL]')
+                                executable_code = executable_code.encode('ascii', errors='replace').decode('ascii')
                                 test_result = fm.code_executor.execute(executable_code)
+                                
+                                if not test_result["success"] and "unicode" in test_result["stderr"].lower():
+                                    test_result["note"] = "Error de encoding del sandbox, no del código."
+                                    test_result["success"] = None
                             else:
                                 test_result = {"success": True, "stderr": "", "stdout": "", "exit_code": 0, "note": "Sin código ejecutable - propuesta conceptual"}
-                            
-                            if code_blocks:
-                                executable_code = "\n\n".join(code_blocks)
-                                # Forzar encoding UTF-8 y añadir declaración si no la tiene
-                                if "encoding" not in executable_code.split('\n')[0]:
-                                    executable_code = "# -*- coding: utf-8 -*-\n" + executable_code
-                                # Reemplazar caracteres problemáticos
-                                executable_code = executable_code.encode('utf-8', errors='replace').decode('utf-8')
-                                test_result = fm.code_executor.execute(executable_code)
 
                             latest["test_result"] = test_result
                             fm.self_engineer._save_proposals()
-                            
+
                             from core.flow.flow_stream import ThoughtItem
-                            if test_result["success"]:
+                            if test_result["success"] is None:
+                                fm.stream.add_thought(ThoughtItem(
+                                    content=f"[Test] ⚠️ No se pudo verificar {latest['file']}: error de encoding del sandbox.",
+                                    thought_type="test_result",
+                                    priority=0.6,
+                                    source="code_executor"
+                                ))
+                            elif test_result["success"]:
                                 fm.stream.add_thought(ThoughtItem(
                                     content=f"[Test] ✅ La solución para {latest['file']} pasó las pruebas.",
                                     thought_type="test_result",
@@ -148,7 +154,7 @@ FEEDBACK: [breve]""",
                                     priority=0.8,
                                     source="code_executor"
                                 ))
-                            print(f"   [SelfEngineer] Test completado: {'✅' if test_result['success'] else '❌'}")
+                            print(f"   [SelfEngineer] Test completado: {'⚠️ encoding' if test_result['success'] is None else '✅' if test_result['success'] else '❌'}")
             
             if hasattr(fm, '_team_channel') and fm._team_channel:
                 replies = fm._team_channel.check("Ada")

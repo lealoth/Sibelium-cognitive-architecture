@@ -38,6 +38,30 @@ class CodeMinifier:
         return '\n'.join(result)
     
     @staticmethod
+    def minify_aggressive(code: str) -> str:
+        """Minificación agresiva para modelo local. Elimina type hints, docstrings, logs, comentarios."""
+        import re
+        
+        # Eliminar docstrings multi-línea
+        code = re.sub(r'""".*?"""', '', code, flags=re.DOTALL)
+        code = re.sub(r"'''.*?'''", '', code, flags=re.DOTALL)
+        
+        # Eliminar type hints (pero no los dos puntos de slices o dicts)
+        code = re.sub(r':\s*\w+\s*=', '=', code)
+        code = re.sub(r'->\s*[\w\[\], ]+:', ':', code)
+        
+        # Eliminar líneas de print/logging
+        code = re.sub(r'^\s*print\(.*\).*\n?', '', code, flags=re.MULTILINE)
+        
+        # Eliminar comentarios inline
+        code = re.sub(r'#.*$', '', code, flags=re.MULTILINE)
+        
+        # Colapsar líneas vacías múltiples
+        code = re.sub(r'\n\s*\n', '\n', code)
+        
+        return code.strip()
+
+    @staticmethod
     def compress_ratio(original: str, minified: str) -> float:
         """Porcentaje de reducción."""
         return (1 - len(minified) / len(original)) * 100 if original else 0

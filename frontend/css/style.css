@@ -548,3 +548,21 @@ body {
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+.message-assistant code {
+    background: #F0F0F0;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+}
+
+.message-assistant strong {
+    font-weight: 600;
+    color: #222;
+}
+
+.message-assistant em {
+    font-style: italic;
+    color: #555;
+}

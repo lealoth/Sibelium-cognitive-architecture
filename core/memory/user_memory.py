@@ -81,6 +81,7 @@ class UserMemory:
         
         nuevos_datos = self._extract_personal_data(user_message)
         nuevos_datos = self._filter_entity_names(nuevos_datos)
+        profile = self._resolve_contradiction(nuevos_datos, profile)
         
         for campo, valor in nuevos_datos.items():
             if valor is not None and valor != profile["datos_personales"].get(campo):
@@ -204,3 +205,21 @@ class UserMemory:
         
         return datos
     
+    def _resolve_contradiction(self, new_data: dict, profile: dict) -> dict:
+        """Cuando hay conflicto entre datos nuevos y existentes."""
+        for campo, nuevo_valor in new_data.items():
+            if not nuevo_valor:
+                continue
+            viejo_valor = profile.get("datos_personales", {}).get(campo)
+            if viejo_valor and viejo_valor != nuevo_valor:
+                if "correcciones" not in profile:
+                    profile["correcciones"] = []
+                profile["correcciones"].append({
+                    "campo": campo,
+                    "valor_anterior": viejo_valor,
+                    "valor_nuevo": nuevo_valor,
+                    "fecha": datetime.now().isoformat(),
+                    "fuente": "correccion_explicita"
+                })
+                profile["datos_personales"][campo] = nuevo_valor
+        return profile

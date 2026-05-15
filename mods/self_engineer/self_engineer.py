@@ -46,14 +46,18 @@ class SelfEngineer:
         
         if lines > 200:
             from mods.self_engineer.code_minifier import CodeMinifier
-            minified = CodeMinifier.minify(content)
+            
+            # Minificar siempre con agresivo
+            minified = CodeMinifier.minify_aggressive(content)
             ratio = CodeMinifier.compress_ratio(content, minified)
+            new_lines = len(minified.split('\n'))
+            
             if ratio > 5:
-                print(f"   [SelfEngineer] Minificado: {ratio:.0f}% reducción ({len(content)} → {len(minified)} chars)")
+                print(f"   [SelfEngineer] Minificado: {ratio:.0f}% reducción ({lines} → {new_lines} líneas)")
                 content = minified
                 file_data["content"] = minified
-                file_data["lines"] = len(minified.split('\n'))
-                lines = file_data["lines"]
+                file_data["lines"] = new_lines
+                lines = new_lines
         
         if lines > 300 and has_cloud:
             result = self._analyze_chunk(file_path, content, file_data)
@@ -146,7 +150,7 @@ TRADE-OFF: [qué se pierde al aplicar el cambio]
         
         lines = file_data.get("lines", 0)
         has_cloud = CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid")
-        
+
         if lines > 300 and has_cloud:
             max_tokens = 2000
             temperature = 0.15
@@ -154,7 +158,7 @@ TRADE-OFF: [qué se pierde al aplicar el cambio]
         else:
             max_tokens = 600
             temperature = 0.2
-            purpose = "interpretar"
+            purpose = "analisis_archivo_local"
         
         return self.llm.generate(prompt, temperature=temperature, max_tokens=max_tokens, purpose=purpose)
     
@@ -266,19 +270,12 @@ Análisis consolidado:"""
         if not files:
             return None
         
-        weighted_files = []
-        for f in files:
-            data = self.reader.get_file(f)
-            lines = data.get("lines", 0)
-            functions = len(data.get("functions", []))
-            weight = lines + functions * 2
-            weighted_files.extend([f] * max(1, weight // 50))
+        if not hasattr(self, '_file_queue') or not self._file_queue:
+            import random
+            self._file_queue = files.copy()
+            random.shuffle(self._file_queue)
         
-        if hasattr(self, '_last_analyzed') and self._last_analyzed in weighted_files and len(weighted_files) > 1:
-            weighted_files = [f for f in weighted_files if f != self._last_analyzed]
-        
-        target = random.choice(weighted_files)
-        self._last_analyzed = target
+        target = self._file_queue.pop(0)
         print(f"   [SelfEngineer] Analizando: {target}")
         return self.analyze_file(target)
     
