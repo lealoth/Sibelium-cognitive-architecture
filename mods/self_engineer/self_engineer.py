@@ -1,6 +1,5 @@
 """Ciclo de automejora."""
 import json
-import random
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -46,14 +45,16 @@ class SelfEngineer:
         
         if lines > 200:
             from mods.self_engineer.code_minifier import CodeMinifier
-            minified = CodeMinifier.minify(content)
+            minified = CodeMinifier.minify_aggressive(content)
             ratio = CodeMinifier.compress_ratio(content, minified)
+            new_lines = len(minified.split('\n'))
+            
             if ratio > 5:
-                print(f"   [SelfEngineer] Minificado: {ratio:.0f}% reducción ({len(content)} → {len(minified)} chars)")
+                print(f"   [SelfEngineer] Minificado: {ratio:.0f}% reducción ({lines} → {new_lines} líneas)")
                 content = minified
                 file_data["content"] = minified
-                file_data["lines"] = len(minified.split('\n'))
-                lines = file_data["lines"]
+                file_data["lines"] = new_lines
+                lines = new_lines
         
         if lines > 300 and has_cloud:
             result = self._analyze_chunk(file_path, content, file_data)
@@ -66,10 +67,15 @@ class SelfEngineer:
                 result = self._analyze_file_chunked(file_path, content, file_data)
         
         if result and "SIN_PROBLEMAS" not in result.upper():
+            # Obtener lecciones y test_result
+            lessons = self._get_engineering_lessons(file_path)
+            test_result = {}  # Se llena después en el ciclo de auto-revisión
+            
             proposal = {
                 "file": file_path,
                 "timestamp": datetime.now().isoformat(),
-                "analysis": result
+                "analysis": self._format_proposal(file_path, result, test_result, lessons),
+                "backend": "cloud_code" if (lines > 300 and has_cloud) else "main"
             }
             self.proposals.append(proposal)
             self._save_proposals()
@@ -117,46 +123,75 @@ class SelfEngineer:
         if dependencies:
             context += f"DEPENDENCIAS (archivos que usan o son usados por este):\n{dependencies}\n\n"
         
+        # Inyectar lecciones de ingeniería previas
+        lessons = self._get_engineering_lessons(label)
+        if lessons:
+            lessons_text = "\n".join([f"- {l[:200]}" for l in lessons])
+            context += f"\n\nLECCIONES APRENDIDAS (NO repitas estos errores):\n{lessons_text}\n"
+
         overview = self._generate_file_overview(file_data)
         
+        # Verificar si ya analizamos este archivo y el código no cambió
+        import hashlib
+        repeated_analysis = ""
+        if not hasattr(self, '_analysis_cache'):
+            self._analysis_cache = {}
+        
+        cache_key = f"last_analysis:{label}"
+        code_hash = hashlib.md5(code.encode()).hexdigest()
+        
+        if cache_key in self._analysis_cache:
+            last_hash, last_result = self._analysis_cache[cache_key]
+            if last_hash == code_hash:
+                repeated_analysis = "\n\nIMPORTANTE: Este archivo ya fue analizado antes y el código no cambió. Buscá problemas que hayas pasado por alto en análisis anteriores. Si no encontrás nada nuevo, respondé SIN_PROBLEMAS."
+        
         prompt = f"""ESTRUCTURA COMPLETA DEL ARCHIVO:
-{overview}
+    {overview}
 
-{context}Analiza este fragmento de código:
+    {context}Analiza este fragmento de código:
 
-ARCHIVO: {label}
-LÍNEAS TOTALES: {file_data.get('lines', '?')}
+    ARCHIVO: {label}
+    LÍNEAS TOTALES: {file_data.get('lines', '?')}
+    {repeated_analysis}
 
-{code}
+    {code}
 
-Identifica problemas REALES. NO repitas hallazgos previos.
-Si una función está incompleta en este fragmento, NO la analices.
-Si no ves problemas REALES, responde SIN_PROBLEMAS.
-Es mejor decir SIN_PROBLEMAS que inventar un problema falso.
+    Identifica problemas REALES. NO repitas hallazgos previos.
+    Si una función está incompleta en este fragmento, NO la analices.
+    Si no ves problemas REALES, responde SIN_PROBLEMAS.
+    Es mejor decir SIN_PROBLEMAS que inventar un problema falso.
 
-Para cada problema:
----
-PROBLEMA: [breve]
-FUNCIÓN: [nombre exacto]
-SEVERIDAD: [baja/media/alta]
-EXPLICACIÓN: [por qué es un problema]
-SOLUCIÓN: [código Python ejecutable que resuelva el problema. Debe ser el MÍNIMO cambio necesario. Solo incluye la función o líneas modificadas, no el archivo completo. Si la solución no requiere código, escribe SIN_CODIGO.]
-TRADE-OFF: [qué se pierde al aplicar el cambio]
----"""
+    Para cada problema:
+    ---
+    PROBLEMA: [breve]
+    FUNCIÓN: [nombre exacto]
+    SEVERIDAD: [baja/media/alta]
+    EXPLICACIÓN: [por qué es un problema]
+    SOLUCIÓN: [código Python ejecutable que resuelva el problema. Debe ser el MÍNIMO cambio necesario. Si la solución no requiere código, escribe SIN_CODIGO.]
+    TRADE-OFF: [qué se pierde al aplicar el cambio]
+    ---"""
         
         lines = file_data.get("lines", 0)
         has_cloud = CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid")
-        
+
         if lines > 300 and has_cloud:
             max_tokens = 2000
             temperature = 0.15
-            purpose = "analizar_imagen"
+            purpose = "analizar_codigo"
         else:
             max_tokens = 600
             temperature = 0.2
-            purpose = "interpretar"
+            purpose = "analisis_archivo_local"
         
-        return self.llm.generate(prompt, temperature=temperature, max_tokens=max_tokens, purpose=purpose)
+        result = self.llm.generate(prompt, temperature=temperature, max_tokens=max_tokens, purpose=purpose)
+        
+        # Guardar en caché de análisis
+        self._analysis_cache[cache_key] = (code_hash, result)
+        if len(self._analysis_cache) > 20:
+            oldest = min(self._analysis_cache, key=lambda k: len(self._analysis_cache))
+            del self._analysis_cache[oldest]
+        
+        return result
     
     def _split_into_chunks(self, content: str, chunk_size: int = 4000) -> list:
         lines = content.split('\n')
@@ -186,8 +221,9 @@ TRADE-OFF: [qué se pierde al aplicar el cambio]
 
         file_data = self.reader.get_file(file_path)
         lines = file_data.get("lines", 0)
-        purpose = "analizar_imagen" if (lines > 300 and CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid")) else "evaluar"
-        max_tokens = 1000 if purpose == "analizar_imagen" else 600
+        has_cloud = CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid")
+        purpose = "consolidar_analisis_codigo" if (lines > 300 and has_cloud) else "evaluar_analisis"
+        max_tokens = 1000 if purpose == "consolidar_analisis_codigo" else 600
 
         prompt = f"""Consolida estos análisis del archivo {file_path}.
 Elimina duplicados y falsos positivos obvios.
@@ -266,21 +302,73 @@ Análisis consolidado:"""
         if not files:
             return None
         
-        weighted_files = []
-        for f in files:
-            data = self.reader.get_file(f)
-            lines = data.get("lines", 0)
-            functions = len(data.get("functions", []))
-            weight = lines + functions * 2
-            weighted_files.extend([f] * max(1, weight // 50))
+        if not hasattr(self, '_file_queue') or not self._file_queue:
+            self._file_queue = list(files)
         
-        if hasattr(self, '_last_analyzed') and self._last_analyzed in weighted_files and len(weighted_files) > 1:
-            weighted_files = [f for f in weighted_files if f != self._last_analyzed]
-        
-        target = random.choice(weighted_files)
-        self._last_analyzed = target
+        target = self._file_queue.pop(0)
         print(f"   [SelfEngineer] Analizando: {target}")
         return self.analyze_file(target)
     
     def get_proposals(self) -> list:
         return self.proposals
+    
+    def _store_engineering_lesson(self, file_path: str, test_result: dict):
+        """Guarda lecciones aprendidas del sandbox en ChromaDB."""
+        try:
+            import json
+            lesson = json.dumps({
+                "file": file_path,
+                "error": test_result.get("stderr", "")[:500],
+                "timestamp": datetime.now().isoformat(),
+                "type": "leccion_de_ingenieria"
+            }, ensure_ascii=False)
+            self.flow.cognitive_loop.episodic_memory.store_interaction(
+                user_message=f"[Lección de Ingeniería] Fallo en {file_path}",
+                assistant_response=lesson,
+                user_id=self.flow.cognitive_loop.user_id
+            )
+        except Exception:
+            pass
+
+
+    def _get_engineering_lessons(self, file_path: str) -> list:
+        """Recupera lecciones previas sobre un archivo."""
+        try:
+            from core.memory.episodic_memory import EpisodicMemory
+            episodic = EpisodicMemory()
+            return episodic.get_relevant(
+                f"Lección de Ingeniería {file_path}",
+                user_id=self.flow.cognitive_loop.user_id,
+                limit=3
+            )
+        except Exception:
+            return []
+        
+    def _format_proposal(self, file_path: str, analysis: str, test_result: dict, lessons: list) -> str:
+        """Formatea la propuesta como Reporte de Evolución Cognitiva."""
+        if test_result.get("success") is None:
+            status = "⚠️ NO VERIFICABLE"
+        elif test_result.get("success"):
+            status = "✅ COMPILACIÓN EXITOSA"
+        else:
+            status = "❌ FALLO EN SANDBOX"
+
+        lessons_text = "\n".join([f"- {l[:150]}" for l in lessons[-3:]]) if lessons else "Ninguna"
+
+        return f"""# PROPUESTA DE EVOLUCIÓN ARQUITECTÓNICA
+    **Propuesta por:** Ada (Self-Engineer)
+    **Archivo:** {file_path}
+    **Estado del Sandbox:** {status}
+
+    ## 1. Análisis y Diagnóstico
+    {analysis[:2000]}
+
+    ## 2. Registro de Autocrítica (Lecciones Previas)
+    {lessons_text}
+
+    ## 3. Código Propuesto
+    [Extraído del análisis]
+
+    ---
+    *Este reporte fue generado automáticamente por el Self-Engineer. Requiere revisión humana antes de aplicar.*
+    """

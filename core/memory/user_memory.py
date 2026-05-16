@@ -8,9 +8,6 @@ from core.llm import LLMModel
 
 class UserMemory:
     """Memoria de usuario multi-sesión.
-    
-    Cada usuario/sesión tiene su propia carpeta bajo entity_data/memory/users/{user_id}/
-    con profile.json y history.json independientes.
     """
     
     def __init__(self, user_id: str = "default"):
@@ -81,6 +78,7 @@ class UserMemory:
         
         nuevos_datos = self._extract_personal_data(user_message)
         nuevos_datos = self._filter_entity_names(nuevos_datos)
+        profile = self._resolve_contradiction(nuevos_datos, profile)
         
         for campo, valor in nuevos_datos.items():
             if valor is not None and valor != profile["datos_personales"].get(campo):
@@ -100,18 +98,24 @@ class UserMemory:
         self.save_profile(profile)
         return profile
 
-    def _extract_personal_data(self, message: str) -> dict:
-        prompt = f"""Extrae SOLO datos personales EXPLÍCITOS del mensaje.
-    Si el mensaje no contiene información personal clara, devuelve campos null.
+    def _extract_personal_data(self, message: str, source_context: str = "") -> dict:
+        context_header = ""
+        if source_context:
+            context_header = f"Contexto del archivo de origen: {source_context}\n"
+        
+        prompt = f"""{context_header}Extrae SOLO datos personales EXPLÍCITOS del USUARIO que habla contigo.
+    NO extraigas información sobre terceras personas mencionadas en la conversación.
+    Si el mensaje habla de otra persona, ignora esos datos.
+    Si la información viene de un archivo antiguo o desactualizado, ignórala.
 
     msg: "{message[:300]}"
 
     Reglas:
-    - name: nombre propio o apodo, máximo 20 caracteres. No frases.
+    - name: nombre propio o apodo DEL USUARIO, máximo 20 caracteres.
     - age: número o null
-    - location: ciudad, país o null. No frases largas.
-    - occupation: profesión o null. Máximo 30 caracteres.
-    - physical_desc: descripción física breve o null. Máximo 40 caracteres.
+    - location: ciudad, país del USUARIO o null
+    - occupation: profesión del USUARIO o null
+    - physical_desc: descripción física del USUARIO o null
 
     Responde SOLO JSON:
     {{"name": "...", "age": ..., "location": "...", "occupation": "...", "physical_desc": "..."}}"""
@@ -124,7 +128,13 @@ class UserMemory:
             json_match = _re.search(r'\{.*\}', result, _re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
-                return self._validate_extracted_data(data)
+                return {
+                    "nombre": data.get("name"),
+                    "edad": data.get("age"),
+                    "ubicacion": data.get("location"),
+                    "ocupacion": data.get("occupation"),
+                    "descripcion_fisica": data.get("physical_desc"),
+                }
         except:
             pass
         
@@ -204,3 +214,21 @@ class UserMemory:
         
         return datos
     
+    def _resolve_contradiction(self, new_data: dict, profile: dict) -> dict:
+        """Cuando hay conflicto entre datos nuevos y existentes."""
+        for campo, nuevo_valor in new_data.items():
+            if not nuevo_valor:
+                continue
+            viejo_valor = profile.get("datos_personales", {}).get(campo)
+            if viejo_valor and viejo_valor != nuevo_valor:
+                if "correcciones" not in profile:
+                    profile["correcciones"] = []
+                profile["correcciones"].append({
+                    "campo": campo,
+                    "valor_anterior": viejo_valor,
+                    "valor_nuevo": nuevo_valor,
+                    "fecha": datetime.now().isoformat(),
+                    "fuente": "correccion_explicita"
+                })
+                profile["datos_personales"][campo] = nuevo_valor
+        return profile

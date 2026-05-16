@@ -1,73 +1,94 @@
-# core/llm.py
+"""Gestión multi-modelo para Sibelium."""
+import json
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-import json
+from collections import deque
+from typing import Optional
+
 from config import (
-    MODEL_PATH, MODEL_CONTEXT_SIZE, MODEL_THREADS, MODEL_GPU_LAYERS,
-    LLM_BACKEND, CLOUD_API_KEY, CLOUD_MODEL_PREMIUM, CLOUD_MODEL_FREE, CLOUD_API_URL,
-    MODEL_PATH_REASONING, MODEL_PATH_JSON, GPU_BACKEND, GPU_LAYERS_MAIN, GPU_LAYERS_REASONING, GPU_LAYERS_JSON, COGNITIVE_TRACE_FILE
+    MODEL_PATH, MODEL_CONTEXT_SIZE, MODEL_THREADS,
+    LLM_BACKEND, CLOUD_API_KEY, CLOUD_API_URL,
+    CLOUD_MODEL_PREMIUM, CLOUD_MODEL_FREE,
+    MODEL_PATH_REASONING, MODEL_PATH_JSON,
+    GPU_BACKEND, GPU_LAYERS_MAIN, GPU_LAYERS_REASONING, GPU_LAYERS_JSON,
 )
 
+COGNITIVE_TRACE_FILE = Path("entity_data/logs/cognitive_trace.jsonl")
+
+
+# ============================================
+# PROPÓSITOS
+# ============================================
+
+# Tareas que van al cloud premium (Gemini)
+PREMIUM_PURPOSES = [
+    "respuesta_final", "generar_respuesta",
+    "analizar_codigo", "analizar_imagen", "auto_mejora",
+]
+
+# Todo lo demás va al modelo local
+# (no hace falta lista, por defecto)
+
+
+# ============================================
+# SINGLETON
+# ============================================
 
 class LLMModel:
     _instance = None
     _lock = threading.Lock()
 
-    # Propósitos que usan cloud premium (pago)
-    PREMIUM_PURPOSES = [
-        "respuesta_final",
-        "reflexion_aprendizaje",
-        "analizar_imagen",
-    ]
-
-    # Propósitos que usan cloud gratuito
-    CLOUD_FREE_PURPOSES = [
-        "interpretar", "evaluar", "decidir",
-        "pensamiento_interpretar", "pensamiento_evaluar", "pensamiento_decidir",
-        "decidir_info", "percepcion_usuario"
-    ]
-
-    # Propósitos de razonamiento ligero (modelo local pequeño)
-    REASONING_PURPOSES = [
-        "verificar_certeza", "clarificar_memory_activity"
-    ]
-    
-    # Propósitos de JSON (modelo local pequeño)
-    JSON_PURPOSES = [
-        "ajustar_estado",
-    ]
-
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def __init__(self):
         if LLMModel._instance is not None:
             return
         LLMModel._instance = self
-        
+
+        from core.llm_metrics import LLMMetrics
+        from config import ENTITY_DATA_DIR
+
+        self.metrics = LLMMetrics(ENTITY_DATA_DIR)
+        self.prompt_cache = {}
+        self._mod_purposes = {"premium": [], "local": []}
         self.model_main = None
         self.model_reasoning = None
         self.model_json = None
         self.backend = LLM_BACKEND
-        self.call_log = []
-        COGNITIVE_TRACE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        
+        self.call_log = deque(maxlen=100)
+        self._init_dirs()
+
         if self.backend in ("local", "hybrid"):
             self._init_local()
 
+    def _init_dirs(self):
+        COGNITIVE_TRACE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    def register_mod_purpose(self, category: str, purpose: str):
+        """Permite a los mods registrar propósitos sin modificar el núcleo."""
+        if category in self._mod_purposes:
+            self._mod_purposes[category].append(purpose)
+
+    # ============================================
+    # INICIALIZACIÓN LOCAL
+    # ============================================
+
     def _init_local(self):
         from llama_cpp import Llama
-        
+
         gpu_kwargs = {}
         if GPU_BACKEND == "vulkan":
             gpu_kwargs["use_vulkan"] = True
 
-        # Modelo principal (Llama 8B)
+        # Modelo principal
         if MODEL_PATH.exists():
             print(f"Cargando modelo principal: {MODEL_PATH}...")
             self.model_main = Llama(
@@ -81,259 +102,296 @@ class LLMModel:
             print("Modelo principal cargado.")
         else:
             print(f"⚠️ Modelo principal no encontrado: {MODEL_PATH}")
-        
-        # Si reasoning y json son el mismo archivo, cargar una sola vez
-        if MODEL_PATH_REASONING == MODEL_PATH_JSON:
-            if MODEL_PATH_REASONING.exists():
-                print(f"Cargando modelo ligero compartido: {MODEL_PATH_REASONING}...")
-                self.model_reasoning = Llama(
-                    model_path=str(MODEL_PATH_REASONING),
-                    n_ctx=2048,
-                    n_threads=MODEL_THREADS,
-                    n_gpu_layers=GPU_LAYERS_REASONING,
-                    verbose=False,
-                    **gpu_kwargs
-                )
-                self.model_json = self.model_reasoning
-                print("Modelo ligero compartido cargado (razonamiento + JSON).")
-            else:
-                print(f"⚠️ Modelo ligero compartido no encontrado: {MODEL_PATH_REASONING}")
-                self.model_reasoning = self.model_main
-                self.model_json = self.model_main
-                print("Usando modelo principal como fallback para tareas ligeras.")
+
+        # Si el modelo de razonamiento es el mismo que el principal, usar el principal sin recargar
+        if MODEL_PATH_REASONING == MODEL_PATH:
+            self.model_reasoning = self.model_main
+            self.model_json = self.model_main
+            print("Modelo ligero: usando modelo principal como fallback (sin recargar).")
+            return
+
+        # Modelo ligero (razonamiento + JSON)
+        if MODEL_PATH_REASONING.exists():
+            print(f"Cargando modelo ligero: {MODEL_PATH_REASONING}...")
+            self.model_reasoning = Llama(
+                model_path=str(MODEL_PATH_REASONING),
+                n_ctx=2048,
+                n_threads=MODEL_THREADS,
+                n_gpu_layers=GPU_LAYERS_REASONING,
+                verbose=False,
+                **gpu_kwargs
+            )
+            self.model_json = self.model_reasoning
+            print("Modelo ligero cargado (razonamiento + JSON).")
         else:
-            # Cargar por separado
-            if MODEL_PATH_REASONING.exists():
-                print(f"Cargando modelo de razonamiento: {MODEL_PATH_REASONING}...")
-                self.model_reasoning = Llama(
-                    model_path=str(MODEL_PATH_REASONING),
-                    n_ctx=2048,
-                    n_threads=MODEL_THREADS,
-                    n_gpu_layers=GPU_LAYERS_REASONING,
-                    verbose=False,
-                    **gpu_kwargs
-                )
-                print("Modelo de razonamiento cargado.")
-            else: 
-                self.model_reasoning = self.model_main
-                print(f"⚠️ Modelo de razonamiento no encontrado, usando modelo principal como fallback.")
+            print(f"⚠️ Modelo ligero no encontrado: {MODEL_PATH_REASONING}")
+            self.model_reasoning = self.model_main
+            self.model_json = self.model_main
 
-            if MODEL_PATH_JSON.exists():
-                print(f"Cargando modelo JSON: {MODEL_PATH_JSON}...")
-                self.model_json = Llama(
-                    model_path=str(MODEL_PATH_JSON),
-                    n_ctx=2048,
-                    n_threads=MODEL_THREADS,
-                    n_gpu_layers=GPU_LAYERS_JSON,
-                    verbose=False,
-                    **gpu_kwargs
-                )
-                print("Modelo JSON cargado.")
-            else: 
-                self.model_json = self.model_main
-                print(f"⚠️ Modelo JSON no encontrado, usando modelo principal como fallback.")
-
-        print("Todos los modelos locales disponibles cargados.")
+        # Si JSON está en path separado
+        if MODEL_PATH_JSON != MODEL_PATH_REASONING and MODEL_PATH_JSON.exists():
+            print(f"Cargando modelo JSON: {MODEL_PATH_JSON}...")
+            self.model_json = Llama(
+                model_path=str(MODEL_PATH_JSON),
+                n_ctx=2048,
+                n_threads=MODEL_THREADS,
+                n_gpu_layers=GPU_LAYERS_JSON,
+                verbose=False,
+                **gpu_kwargs
+            )
+            print("Modelo JSON cargado.")
 
     def load_model(self):
-        """Carga los modelos según el backend configurado."""
         if self.backend in ("local", "hybrid") and self.model_main is None:
             self._init_local()
-        elif self.backend == "cloud":
-            print("Modo cloud: sin modelo local.")
 
-    
-    def generate(self, prompt, temperature=0.7, max_tokens=150, purpose=None):
-        t_start = time.time()
-        
-        backend = self._select_backend(purpose)
-        
-        # Solo necesitamos lock para modelos locales
-        if backend in ("main", "reasoning", "json"):
-            # Esperar a que el modelo esté libre
-            with LLMModel._lock:
-                return self._generate_locked(prompt, temperature, max_tokens, purpose, backend, t_start)
-        else:
-            # Cloud no necesita lock
-            return self._generate_locked(prompt, temperature, max_tokens, purpose, backend, t_start)
+    # ============================================
+    # SELECCIÓN DE BACKEND
+    # ============================================
 
-    def _generate_locked(self, prompt, temperature, max_tokens, purpose, backend, t_start):
-        """Generación real dentro del lock."""
-        print(f"🤖 LLM generate [{backend}] - purpose: {purpose}, max_tokens: {max_tokens}")
-        
-        response = None
-        
-        if backend == "cloud_premium":
-            response = self._try_cloud_model(CLOUD_MODEL_PREMIUM, prompt, temperature, max_tokens)
-            if response is not None:
-                pass
-            else:
-                print(f"   🔄 Fallback Premium → Free...")
-                response = self._try_cloud_model(CLOUD_MODEL_FREE, prompt, temperature, max_tokens)
-                if response is not None:
-                    backend = "cloud_free"
-        
-        elif backend == "cloud_free":
-            response = self._try_cloud_model(CLOUD_MODEL_FREE, prompt, temperature, max_tokens)
-            if response is not None:
-                pass
-            else:
-                print(f"   🔄 Fallback Free → Premium...")
-                response = self._try_cloud_model(CLOUD_MODEL_PREMIUM, prompt, temperature, max_tokens)
-                if response is not None:
-                    backend = "cloud_premium"
-        
-        if response is None:
-            if backend.startswith("cloud"):
-                print(f"   🔄 Fallback final → modelo local...")
-            response = self._generate_local(prompt, temperature, max_tokens, purpose)
-            backend = self._select_backend(purpose)
-            if backend in ("cloud_premium", "cloud_free"):
-                backend = "main"
-        
-        elapsed = time.time() - t_start
-        print(f"🤖 Generación exitosa [{backend}], length: {len(response) if response else 0}")
-        
-        self._log_call(
-            purpose=purpose or "unknown",
-            prompt_length=len(prompt),
-            response_length=len(response) if response else 0,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            elapsed=elapsed,
-            backend=backend
-        )
-        
-        return response
+    def _select_backend(self, purpose: str) -> str:
+        """Elige backend según el propósito."""
+        if not purpose:
+            return self._fallback_local()
 
-    def _select_backend(self, purpose):
-        """Elige backend según el propósito de la llamada."""
+        # Cloud premium
+        if purpose in PREMIUM_PURPOSES:
+            if CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid"):
+                return "cloud_premium"
+        if purpose in self._mod_purposes.get("premium", []):
+            if CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid"):
+                return "cloud_premium"
 
-        # Forzar percepción de usuario a modelo principal (evita rechazos de Llama 3.1)
-        if purpose == "percepcion_usuario":
-            if self.model_main:
-                return "main"
-            return "local"
+        # Cloud free (si hay API key)
+        if purpose in self._mod_purposes.get("free", []):
+            if CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid"):
+                return "cloud_free"
 
-        # Premium
-        if purpose in self.PREMIUM_PURPOSES and CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid"):
-            return "cloud_premium"
-        
-        # Cloud gratuito
-        if purpose in self.CLOUD_FREE_PURPOSES and CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid"):
-            return "cloud_free"
-        
-        # Razonamiento local
-        if purpose in self.REASONING_PURPOSES and self.model_reasoning:
-            return "reasoning"
-        
-        # JSON local
-        if purpose in self.JSON_PURPOSES and self.model_json:
-            return "json"
-        
-        # Fallback a modelo principal local
+        # Local reasoning
+        if purpose in ["validar_nombre", "detectar_anomalia", "borrador_respuesta"]:
+            if self.model_reasoning:
+                return "reasoning"
+
+        # JSON
+        if purpose in ["extraer_datos_usuario", "ajustar_estado", "analizar_usuario"]:
+            if self.model_json:
+                return "json"
+
+        return self._fallback_local()
+
+    def _fallback_local(self) -> str:
         if self.model_main:
             return "main"
-        
         return "local"
 
-    def _generate_local(self, prompt, temperature, max_tokens, purpose=None):
-        """Usa el modelo local apropiado según el propósito."""
-        backend = self._select_backend(purpose)
-        
+    # ============================================
+    # GENERACIÓN PRINCIPAL
+    # ============================================
+
+    def generate(self, prompt, temperature=0.7, max_tokens=150, purpose=None):
+        t_start = time.time()
+
+        cached = self._get_cached(prompt, purpose)
+        if cached:
+            print(f"🤖 LLM [cache] - {purpose}")
+            self.metrics.record(purpose, "cache", len(prompt) // 4, len(cached) // 4, 0, cached=True)
+            return cached
+
+        # Mediador Talámico: reevaluar backend según carga cognitiva
+        backend = self._thalamic_route(prompt, purpose, 0.5)
+
+        with LLMModel._lock:
+            result = self._generate(prompt, temperature, max_tokens, purpose, backend, t_start)
+
+        self._set_cached(prompt, purpose, result)
+
+        elapsed = time.time() - t_start
+        print(f"🤖 [{backend}] {purpose} | {len(result)} chars | {elapsed:.1f}s")
+        self.metrics.record(purpose, backend, len(prompt) // 4, len(result) // 4, elapsed)
+        return result
+
+    def _generate(self, prompt: str, temperature: float, max_tokens: int, purpose: str, backend: str, t_start: float) -> str:
+        """Genera respuesta según el backend."""
+        response = None
+
+        if backend == "cloud_premium":
+            response = self._try_cloud(CLOUD_MODEL_PREMIUM, prompt, temperature, max_tokens)
+        elif backend == "cloud_free":
+            response = self._try_cloud(CLOUD_MODEL_FREE, prompt, temperature, max_tokens)
+        else:
+            response = self._generate_local(prompt, temperature, max_tokens, backend)
+
+        # Fallback cloud → local
+        if response is None and backend.startswith("cloud"):
+            print(f"   🔄 Fallback → modelo local")
+            response = self._generate_local(prompt, temperature, max_tokens, "main")
+
+        return response or ""
+
+    # ============================================
+    # GENERACIÓN LOCAL
+    # ============================================
+
+    def _generate_local(self, prompt: str, temperature: float, max_tokens: int, backend: str) -> Optional[str]:
+        """Usa el modelo local apropiado."""
         if backend == "reasoning" and self.model_reasoning:
             model = self.model_reasoning
         elif backend == "json" and self.model_json:
             model = self.model_json
-        else:
+        elif self.model_main:
             model = self.model_main
-        
-        if model is None:
-            return "Error: modelo no disponible."
-        
-        result = model.create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        return result["choices"][0]["message"]["content"]
+        else:
+            return None
 
-    def _try_cloud_model(self, model_name, prompt, temperature, max_tokens):
-        """Intenta generar con un modelo cloud específico. Retorna None si falla."""
+        try:
+            result = model.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"   ⚠️ Error en modelo local ({type(e).__name__}): {e}")
+            return None
+
+    def _thalamic_route(self, prompt: str, purpose: str, context_entropy: float = 0.5) -> str:
+        """
+        Mediador Talámico: decide si una tarea va al modelo local o al cloud
+        basado en la Carga Atencional Esperada (CE), no solo en el propósito.
+        CE = (Largo_Prompt * 0.4) + (Estrés_Cognitivo * 0.4) + (Complejidad_Grafo * 0.2)
+        """
+        # Solo aplicar a tareas que normalmente irían al local
+        backend = self._select_backend(purpose)
+        if backend not in ("main", "reasoning", "json"):
+            return backend  # Ya va al cloud, no cambiar
+
+        # Si no hay cloud disponible, quedarse en local
+        from config import CLOUD_API_KEY, LLM_BACKEND
+        if not (CLOUD_API_KEY and LLM_BACKEND in ("cloud", "hybrid")):
+            return backend
+
+        # Calcular Carga Atencional Esperada
+        prompt_length = len(prompt)
+        max_context = 8192
+        prompt_ratio = min(1.0, prompt_length / max_context)
+
+        # Estrés cognitivo (0-1)
+        cognitive_stress = getattr(self, '_cognitive_stress', 0.5)
+
+        # Complejidad del grafo (aproximada por entropía)
+        graph_complexity = 1.0 - context_entropy
+
+        CE = (prompt_ratio * 0.4) + (cognitive_stress * 0.4) + (graph_complexity * 0.2)
+
+        if CE > 0.65:
+            print(f"   [Talámico] CE={CE:.2f} > 0.65. Reclutando Gemini...")
+            return "cloud_premium"
+
+        return backend
+
+
+    def set_cognitive_stress(self, stress: float):
+        """Actualiza el nivel de estrés cognitivo (0-1)."""
+        self._cognitive_stress = max(0.0, min(1.0, stress))
+
+    # ============================================
+    # API CLOUD
+    # ============================================
+
+    def _try_cloud(self, model_name: str, prompt: str, temperature: float, max_tokens: int) -> Optional[str]:
+        """Intenta generar con un modelo cloud."""
         import requests
-        
+
         headers = {
             "Authorization": f"Bearer {CLOUD_API_KEY}",
             "Content-Type": "application/json",
             "HTTP-Referer": "http://localhost:8000",
             "X-Title": "Sibelium Cognitive Assistant"
         }
-        
+
         data = {
             "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        
-        try:
-            resp = requests.post(
-                f"{CLOUD_API_URL}/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=30
-            )
-            
-            if resp.status_code == 200:
-                return resp.json()["choices"][0]["message"]["content"]
-            elif resp.status_code == 402:
-                print(f"   ⚠️ Sin créditos para {model_name}")
+
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    f"{CLOUD_API_URL}/chat/completions",
+                    headers=headers,
+                    json=data,
+                    timeout=90
+                )
+
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+                elif resp.status_code in (502, 504):
+                    print(f"   ⚠️ Timeout {model_name} (intento {attempt + 1}/2)")
+                    time.sleep(3)
+                    continue
+                elif resp.status_code == 402:
+                    print(f"   ⚠️ Sin créditos: {model_name}")
+                    return None
+                elif resp.status_code == 429:
+                    print(f"   ⚠️ Rate limit: {model_name}")
+                    return None
+                else:
+                    print(f"   ⚠️ {model_name}: HTTP {resp.status_code} - {resp.text[:150]}")
+                    return None
+
+            except requests.exceptions.Timeout:
+                print(f"   ⚠️ Timeout conexión {model_name}")
                 return None
-            elif resp.status_code == 429:
-                print(f"   ⚠️ Rate limit para {model_name}")
+            except requests.exceptions.ConnectionError as e:
+                print(f"   ⚠️ Error conexión {model_name}: {e}")
                 return None
-            else:
-                print(f"   ⚠️ Error {resp.status_code} para {model_name}")
+            except Exception as e:
+                print(f"   ⚠️ Error {model_name} ({type(e).__name__}): {str(e)[:150]}")
                 return None
-                
-        except Exception as e:
-            print(f"   ⚠️ Error cloud ({type(e).__name__}): {str(e)[:80]}")
+
+        return None
+
+    # ============================================
+    # CACHÉ KV
+    # ============================================
+
+    CACHEABLE = [
+        "reflexion_fondo", "curiosidad_fondo", "evaluar_detector",
+        "decidir_info", "check_identity", "resumir_contexto",
+        "prediccion", "redirigir_pensamiento", "evaluar_diversidad",
+        "limpiar_curiosidades", "consolidacion", "regular_emocion",
+        "mensaje_proactivo", "decidir_busqueda", "busqueda_desde_pensamiento",
+    ]
+
+    def _get_cached(self, prompt: str, purpose: str) -> Optional[str]:
+        if purpose not in self.CACHEABLE:
             return None
+        key = f"{purpose}:{prompt[:200]}"
+        if key in self.prompt_cache:
+            cached_time, cached_result = self.prompt_cache[key]
+            if time.time() - cached_time < 300:
+                return cached_result
+        return None
 
-    def _log_call(self, purpose, prompt_length, response_length, temperature, max_tokens, elapsed, backend="local"):
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "purpose": purpose,
-            "backend": backend,
-            "prompt_length": prompt_length,
-            "response_length": response_length,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "elapsed_seconds": round(elapsed, 2)
-        }
-        
-        self.call_log.append(entry)
-        if len(self.call_log) > 100:
-            self.call_log = self.call_log[-100:]
-        
-        try:
-            with open(COGNITIVE_TRACE_FILE, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception as e:
-            print(f"⚠️ No se pudo guardar trace: {e}")
+    def _set_cached(self, prompt: str, purpose: str, result: str):
+        if purpose not in self.CACHEABLE:
+            return
+        key = f"{purpose}:{prompt[:200]}"
+        self.prompt_cache[key] = (time.time(), result)
+        if len(self.prompt_cache) > 50:
+            oldest = min(self.prompt_cache, key=lambda k: self.prompt_cache[k][0])
+            del self.prompt_cache[oldest]
 
-    def get_recent_activity(self, limit=10):
-        recent = self.call_log[-limit:]
+    # ============================================
+    # ACTIVIDAD RECIENTE
+    # ============================================
+
+    def get_recent_activity(self, limit: int = 10) -> str:
+        recent = list(self.call_log)[-limit:]
         lines = []
         for c in recent:
-            timestamp = c['timestamp'][:19] if isinstance(c['timestamp'], str) else c['timestamp']
-            purpose = c.get('purpose', 'unknown')
-            backend = c.get('backend', 'local')
-            elapsed = c.get('elapsed_seconds', 0)
-            summary = c.get('summary', '')
-            
-            if purpose == "pensamiento_fondo" and summary:
-                lines.append(f"- [{timestamp}] [fondo] {summary}")
-            else:
-                lines.append(f"- [{timestamp}] [{backend}] {purpose} ({elapsed}s)")
-        return "\n".join(lines) if lines else "Sin actividad registrada aún."
+            ts = c['timestamp'][:19] if isinstance(c['timestamp'], str) else c['timestamp']
+            lines.append(f"- [{ts}] [{c.get('backend', '?')}] {c.get('purpose', '?')} ({c.get('elapsed_seconds', 0)}s)")
+        return "\n".join(lines) if lines else "Sin actividad registrada."

@@ -22,7 +22,6 @@ class FileAnalyzer:
         self.blip_processor = None
         self.blip_model = None
         self.whisper_model = None
-        self._init_blip()
 
     def _init_blip(self):
         try:
@@ -154,6 +153,7 @@ Proporciona un análisis estructurado: propósito general, funciones clave, depe
 
     def _analyze_image(self, path: Path, llm=None) -> dict:
         if self.blip_model is None:
+            self._init_blip()
             return {"type": "image", "content": "Analizador de imágenes no disponible."}
         try:
             image = Image.open(path).convert("RGB")
@@ -251,8 +251,9 @@ Responde en español, en 2-4 oraciones."""
             import cv2
         except ImportError:
             return {"type": "error", "content": "OpenCV no instalado. Ejecuta: pip install opencv-python"}
+        
+        cap = cv2.VideoCapture(str(path))
         try:
-            cap = cv2.VideoCapture(str(path))
             if not cap.isOpened():
                 return {"type": "error", "content": "No se pudo abrir el video."}
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -268,25 +269,31 @@ Responde en español, en 2-4 oraciones."""
                 if not ret:
                     break
                 if frame_count % frame_interval == 0:
-                    temp_path = path.parent / f"_temp_frame_{analyzed}.jpg"
-                    cv2.imwrite(str(temp_path), frame)
-                    result = self._analyze_image(temp_path, llm)
-                    desc = result.get("interpretation", result.get("description", ""))
-                    if desc:
-                        descriptions.append(desc)
-                    temp_path.unlink(missing_ok=True)
+                    import tempfile
+                    tmp_suffix = f"_frame_{analyzed}.jpg"
+                    with tempfile.NamedTemporaryFile(suffix=tmp_suffix, delete=False) as f:
+                        temp_path = Path(f.name)
+                    try:
+                        cv2.imwrite(str(temp_path), frame)
+                        result = self._analyze_image(temp_path, llm)
+                        desc = result.get("interpretation", result.get("description", ""))
+                        if desc:
+                            descriptions.append(desc)
+                    finally:
+                        temp_path.unlink(missing_ok=True)
                     analyzed += 1
                 frame_count += 1
-            cap.release()
             video_result = {"type": "video", "file": path.name, "duration_seconds": round(duration, 1), "frames_analyzed": analyzed, "descriptions": descriptions}
             if llm and descriptions:
                 prompt = f"""Se analizó un video de {round(duration)} segundos. 
-Descripciones de fotogramas clave:
-{chr(10).join([f'{i+1}. {d}' for i, d in enumerate(descriptions)])}
+    Descripciones de fotogramas clave:
+    {chr(10).join([f'{i+1}. {d}' for i, d in enumerate(descriptions)])}
 
-Genera un resumen narrativo de lo que sucede en el video.
-Responde en español, en 3-5 oraciones."""
+    Genera un resumen narrativo de lo que sucede en el video.
+    Responde en español, en 3-5 oraciones."""
                 video_result["narrative"] = llm.generate(prompt, temperature=0.5, max_tokens=150, purpose="analizar_video")
             return video_result
         except Exception as e:
             return {"type": "error", "content": f"Error analizando video: {e}"}
+        finally:
+            cap.release()

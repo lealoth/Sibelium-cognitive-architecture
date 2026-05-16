@@ -30,7 +30,7 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 import hashlib
 
-from config import ENTITY_DATA_DIR
+from config import ENTITY_DATA_DIR, USERS_DIR
 from core.cognitive_loop import CognitiveLoop
 
 from mods.loader import loader
@@ -42,7 +42,6 @@ from config import ENABLED_MODS
 
 UPLOADS_DIR = ENTITY_DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-USERS_DIR = ENTITY_DATA_DIR / "memory" / "users"
 USERS_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {
@@ -535,6 +534,13 @@ async def debug():
         "active_sessions": len(sessions),
     }
 
+
+@app.get("/api/metrics")
+async def get_metrics(session_id: str = "default"):
+    loop = get_or_create_loop(session_id)
+    if hasattr(loop.flow_manager, 'llm') and hasattr(loop.flow_manager.llm, 'metrics'):
+        return {"summary": loop.flow_manager.llm.metrics.get_summary()}
+    return {"summary": "Métricas no disponibles"}
 
 # ============================================
 # UTILIDADES

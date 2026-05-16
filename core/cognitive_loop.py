@@ -26,6 +26,7 @@ class CognitiveLoop:
         self.user_dir.mkdir(parents=True, exist_ok=True)
         self.history_path = self.user_dir / "history.json"
         self.interaction_count_path = self.user_dir / "interaction_count.json"
+        self.conversation_summary = ""
 
         # Memorias (UserMemory recibe user_id)
         self.episodic_memory = EpisodicMemory()
@@ -136,7 +137,6 @@ class CognitiveLoop:
         now = datetime.now()
         self.interaction_count += 1
         self._save_interaction_count()
-        print("🟢 INICIO process")
 
         persona = self.load_persona()
         analysis = analyze_user_message(message)
@@ -154,14 +154,11 @@ class CognitiveLoop:
             recent_summary=recent_summary,
         )
 
-        print(f"🟢 cognitive_state construido | Contexto: {recent_summary[:80]}..." if recent_summary else "🟢 cognitive_state construido")
-
+        # Generar respuesta (Hilo Principal - CEN)
         result = self.flow_manager.handle_user_message(message)
         response = result.get("response", "") if result else ""
         if not response or not response.strip():
-            response = "Lo siento, me quedé sin palabras. ¿Puedes repetir eso de otra forma?"
-
-        print(f"🟢 Respuesta ({len(response)} chars): {response[:100]}...")
+            response = "Lo siento, me quedé sin palabras."
 
         self.last_thoughts_current = result.get("thought_history", []) if result else []
         if not self.last_thoughts_current:
@@ -175,30 +172,51 @@ class CognitiveLoop:
             "cognitive_state": self.last_state,
         }
 
+        # Post-procesamiento DIFERIDO (Hilo Secundario - Hipocampo)
+        # No bloquea la respuesta al usuario
         threading.Thread(
-            target=self._post_process,
+            target=self._deferred_post_process,
             args=(message, response, analysis, cognitive_state, now),
             daemon=True
         ).start()
-        print("🟢 Post-procesos en segundo plano | Respuesta ya entregada")
 
         return return_result
+
+
+    def _deferred_post_process(self, message: str, response: str, analysis: dict, cognitive_state, now):
+        """Consolidación diferida asíncrona (Hipocampo). No bloquea la respuesta."""
+        try:
+            # 1. Post-procesamiento original (percepción, estado, memoria)
+            self._post_process(message, response, analysis, cognitive_state, now)
+
+            # 2. Actualizar grafo (NetworkX PageRank)
+            # self.flow_manager.stream._auto_link_all()
+
+            # 3. Actualizar estrés cognitivo para el Mediador Talámico
+            if hasattr(self.flow_manager, '_get_context_entropy'):
+                entropy = self.flow_manager._get_context_entropy()
+                stress = 1.0 - entropy
+                self.flow_manager.llm.set_cognitive_stress(stress)
+        except Exception as e:
+            print(f"⚠️ Error en post-procesamiento diferido: {e}")
 
     def _get_recent_summary(self) -> str:
         recent = self.last_history[-6:]
         if not recent:
             return ""
         
-        persona_name = "Entidad"
-        try:
-            persona_name = self.load_persona().get("name", "Entidad")
-        except:
-            pass
+        persona_name = self._get_persona_name()
         
         return " | ".join([
             f"{persona_name if e['role'] == 'assistant' else 'Usuario'}: {e['text']}"
             for e in recent
         ])
+
+    def _get_persona_name(self) -> str:
+        try:
+            return self.load_persona().get("name", "Entidad")
+        except:
+            return "Entidad" 
 
     # ============================================
     # POST-PROCESOS
@@ -240,14 +258,12 @@ class CognitiveLoop:
         except Exception as e:
             print(f"⚠️ Error guardando historial: {e}")
 
+        self._update_conversation_summary(message, response)
+
         print("🏁 Post-procesos completados")
 
     def _is_anomaly(self, response: str) -> bool:
-        name = "la entidad"
-        try:
-            name = self.load_persona().get("name", "la entidad")
-        except:
-            pass
+        name = self._get_persona_name()
         
         prompt = f"""¿Esta respuesta fue escrita por {name} o por un asistente genérico?
 
@@ -322,11 +338,7 @@ Responde en JSON exacto:
         contexto = self._get_recent_summary()
         llm = LLMModel.get_instance()
         
-        persona_name = "la entidad"
-        try:
-            persona_name = self.load_persona().get("name", "la entidad")
-        except:
-            pass
+        persona_name = self._get_persona_name()
         
         if nombre_usuario and len(nombre_usuario) > 1:
             if not self._is_valid_name(nombre_usuario):
@@ -455,3 +467,30 @@ Responde en JSON exacto:
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             print(f"⚠️ Error al reiniciar: {e}")
+
+    def _update_conversation_summary(self, message: str, response: str):
+        """Mantiene un resumen progresivo de la conversación con etiquetas semánticas."""
+        if not self.conversation_summary:
+            self.conversation_summary = f"Usuario: {message[:100]}\nEntidad: {response[:100]}"
+            return
+        
+        try:
+            llm = LLMModel.get_instance()
+            
+            prompt = f"""Resumen anterior:
+    {self.conversation_summary}
+
+    Nuevo intercambio:
+    Usuario: {message[:150]}
+    Entidad: {response[:150]}
+
+    Actualiza el resumen. Máximo 300 caracteres.
+    Resumen actualizado:"""
+            
+            self.conversation_summary = llm.generate(prompt, temperature=0.2, max_tokens=150, purpose="interpretar")
+            
+            tags_prompt = f"Resumen: {self.conversation_summary}\n\nExtrae 2-3 etiquetas temáticas (una palabra cada una).\nEtiquetas:"
+            tags = llm.generate(tags_prompt, temperature=0.1, max_tokens=15, purpose="interpretar")
+            self.conversation_summary += f" [Tags: {tags.strip()}]"
+        except:
+            pass

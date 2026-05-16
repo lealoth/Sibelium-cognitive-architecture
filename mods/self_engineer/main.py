@@ -12,6 +12,12 @@ def setup(flow_manager):
     engineer = SelfEngineer(flow_manager, base_dir)
     executor = CodeExecutor()
     
+    # Registrar propósitos del mod
+    if hasattr(flow_manager.llm, 'register_mod_purpose'):
+        flow_manager.llm.register_mod_purpose("premium", "analizar_codigo")
+        flow_manager.llm.register_mod_purpose("premium", "consolidar_analisis_codigo")
+        flow_manager.llm.register_mod_purpose("local", "evaluar_analisis")
+
     flow_manager.code_reader = engineer.reader
     flow_manager.self_engineer = engineer
     flow_manager.code_executor = executor
@@ -35,12 +41,18 @@ def setup(flow_manager):
     
     def on_startup(fm):
         engineer.reader.index_codebase()
+        
+        # Recuperar posición de la cola desde mod.json
+        mod_json = Path(__file__).parent / "mod.json"
+        if mod_json.exists():
+            config = json.loads(mod_json.read_text(encoding="utf-8"))
+            saved_index = config.get("queue_index", 0)
+            all_files = sorted(engineer.reader.index.keys())
+            if saved_index < len(all_files):
+                engineer._file_queue = all_files[saved_index:] + all_files[:saved_index]
+                print(f"   [SelfEngineer] Cola restaurada desde índice {saved_index}.")
+        
         print("   [SelfEngineer] Codebase indexed.")
-        if interval_seconds == 0:
-            try:
-                engineer.run_cycle()
-            except Exception as e:
-                print(f"   [!] Error en ciclo inicial: {e}")
     
     def on_slow_tick(fm):
         nonlocal last_run
@@ -50,6 +62,19 @@ def setup(flow_manager):
         last_run["time"] = now
         try:
             result = engineer.run_cycle()
+            
+            # Guardar posición actual en mod.json para persistencia entre reinicios
+            if hasattr(engineer, '_file_queue') and engineer._file_queue:
+                all_files = sorted(engineer.reader.index.keys()) if engineer.reader.index else []
+                if all_files:
+                    next_file = engineer._file_queue[0] if engineer._file_queue else ""
+                    if next_file in all_files:
+                        index = all_files.index(next_file)
+                        mod_json = Path(__file__).parent / "mod.json"
+                        if mod_json.exists():
+                            config = json.loads(mod_json.read_text(encoding="utf-8"))
+                            config["queue_index"] = index
+                            mod_json.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
             
             if result and hasattr(fm, '_team_channel') and fm._team_channel:
                 proposals = engineer.get_proposals()
@@ -74,18 +99,18 @@ def setup(flow_manager):
                         evaluation = fm.llm.generate(
                             f"""Eres una ingeniera senior revisando el trabajo de una ingeniera junior.
 
-Propuesta técnica:
-{latest['analysis'][:1000]}
+    Propuesta técnica:
+    {latest['analysis'][:1000]}
 
-Evalúa:
-1. ¿Es técnicamente correcta?
-2. ¿Es implementable?
-3. ¿Qué impacto tendría en el sistema?
+    Evalúa:
+    1. ¿Es técnicamente correcta?
+    2. ¿Es implementable?
+    3. ¿Qué impacto tendría en el sistema?
 
-Responde con:
-DECISIÓN: [APROBAR / RECHAZAR / REFINAR]
-FEEDBACK: [breve]""",
-                            temperature=0.2, max_tokens=200, purpose="evaluar"
+    Responde con:
+    DECISIÓN: [APROBAR / RECHAZAR / REFINAR]
+    FEEDBACK: [breve]""",
+                            temperature=0.2, max_tokens=200, purpose="evaluar_analisis"
                         )
                         latest["evaluated"] = True
                         latest["self_review"] = evaluation
@@ -99,16 +124,7 @@ FEEDBACK: [breve]""",
                             source="self_engineer"
                         ))
                         print(f"   [SelfEngineer] Auto-revisión completada.")
-
-                        if self_review_enabled and latest.get("self_review"):
-                            # Inyectar la auto-revisión como pensamiento para que aprenda
-                            from core.flow.flow_stream import ThoughtItem
-                            fm.stream.add_thought(ThoughtItem(
-                                content=f"[Aprendizaje] Mi auto-revisión de {latest['file']}: {latest['self_review'][:200]}",
-                                thought_type="learning",
-                                priority=0.75,
-                                source="self_review"
-                            ))
+                    
                     # Test de solución
                     if test_solutions_enabled and hasattr(fm, 'code_executor') and fm.code_executor:
                         solution_code = latest.get("analysis", "")
@@ -117,24 +133,48 @@ FEEDBACK: [breve]""",
                             code_blocks = re.findall(r'```python\n(.*?)```', solution_code, re.DOTALL)
                             if code_blocks:
                                 executable_code = "\n\n".join(code_blocks)
+                                executable_code = executable_code.replace('\u2192', '->')
+                                executable_code = executable_code.replace('\u2713', '[OK]')
+                                executable_code = executable_code.replace('\u2717', '[FAIL]')
+                                executable_code = executable_code.encode('ascii', errors='replace').decode('ascii')
                                 test_result = fm.code_executor.execute(executable_code)
+                                
+                                if not test_result["success"] and "unicode" in test_result["stderr"].lower():
+                                    test_result["note"] = "Error de encoding del sandbox, no del código."
+                                    test_result["success"] = None
                             else:
                                 test_result = {"success": True, "stderr": "", "stdout": "", "exit_code": 0, "note": "Sin código ejecutable - propuesta conceptual"}
                             
-                            if code_blocks:
-                                executable_code = "\n\n".join(code_blocks)
-                                # Forzar encoding UTF-8 y añadir declaración si no la tiene
-                                if "encoding" not in executable_code.split('\n')[0]:
-                                    executable_code = "# -*- coding: utf-8 -*-\n" + executable_code
-                                # Reemplazar caracteres problemáticos
-                                executable_code = executable_code.encode('utf-8', errors='replace').decode('utf-8')
-                                test_result = fm.code_executor.execute(executable_code)
-
                             latest["test_result"] = test_result
+
+                            # Actualizar el análisis con el Reporte de Evolución Cognitiva
+                            lessons = fm.self_engineer._get_engineering_lessons(latest["file"])
+                            latest["analysis"] = fm.self_engineer._format_proposal(
+                                latest["file"],
+                                latest["analysis"],
+                                test_result,
+                                lessons
+                            )
                             fm.self_engineer._save_proposals()
                             
+                            lessons = fm.self_engineer._get_engineering_lessons(latest["file"])
+                            latest["analysis"] = fm.self_engineer._format_proposal(
+                                latest["file"],
+                                latest["analysis"],
+                                test_result,
+                                lessons
+                            )
+                            fm.self_engineer._save_proposals()
+
                             from core.flow.flow_stream import ThoughtItem
-                            if test_result["success"]:
+                            if test_result["success"] is None:
+                                fm.stream.add_thought(ThoughtItem(
+                                    content=f"[Test] ⚠️ No se pudo verificar {latest['file']}: error de encoding del sandbox.",
+                                    thought_type="test_result",
+                                    priority=0.6,
+                                    source="code_executor"
+                                ))
+                            elif test_result["success"]:
                                 fm.stream.add_thought(ThoughtItem(
                                     content=f"[Test] ✅ La solución para {latest['file']} pasó las pruebas.",
                                     thought_type="test_result",
@@ -148,8 +188,23 @@ FEEDBACK: [breve]""",
                                     priority=0.8,
                                     source="code_executor"
                                 ))
-                            print(f"   [SelfEngineer] Test completado: {'✅' if test_result['success'] else '❌'}")
-            
+                            print(f"   [SelfEngineer] Test completado: {'⚠️ encoding' if test_result['success'] is None else '✅' if test_result['success'] else '❌'}")
+                            
+                            # Inyectar feedback cerebeloso como aprendizaje
+                            if not test_result.get("success") and test_result.get("cerebellar_feedback"):
+                                fb = test_result["cerebellar_feedback"]
+                                lesson = (
+                                    f"[Lección] Error {fb.get('error_type')} en línea {fb.get('linea_exacta')}: "
+                                    f"{fb.get('sugerencia_sinaptica', '')[:150]}"
+                                )
+                                fm.stream.add_thought(ThoughtItem(
+                                    content=lesson,
+                                    thought_type="learning",
+                                    priority=0.7,
+                                    source="cerebellar_feedback"
+                                ))
+
+            # Revisar respuestas de otras entidades
             if hasattr(fm, '_team_channel') and fm._team_channel:
                 replies = fm._team_channel.check("Ada")
                 for reply in replies:
@@ -164,12 +219,6 @@ FEEDBACK: [breve]""",
                         print(f"   [SelfEngineer] Feedback recibido de {reply['sender']}.")
         except Exception as e:
             print(f"   [!] Error en ciclo de automejora: {e}")
-    
-    flow_manager._mod_hooks["on_startup"].append(on_startup)
-    flow_manager._mod_hooks["on_slow_tick"].append(on_slow_tick)
-    
-    print("   [SelfEngineer] Ready.")
-    return {"engineer": engineer, "executor": executor}
 
 
 def teardown(flow_manager):

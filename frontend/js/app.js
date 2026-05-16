@@ -371,19 +371,39 @@ async function loadSessions() {
     const msg = document.createElement('div');
     msg.className = `message message-${role}`;
     if (isThinking) msg.classList.add('thinking');
-    msg.innerHTML = `<div>${escapeHtml(text)}</div><div class="message-timestamp">${new Date().toLocaleTimeString()}</div>`;
+    const formatted = role === 'assistant' && !isThinking ? renderMarkdown(escapeHtml(text)) : escapeHtml(text);
+    msg.innerHTML = `<div>${formatted}</div><div class="message-timestamp">${new Date().toLocaleTimeString()}</div>`;
     container.appendChild(msg);
     container.scrollTop = container.scrollHeight;
   }
 
+  function renderMarkdown(text) {
+    // Saltos de línea
+    text = text.replace(/\n/g, '<br>');
+    // Negrita
+    text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    // Itálica
+    text = text.replace(/\*(.*?)\*/g, '<em>$1</em>');
+    // Código inline
+    text = text.replace(/`(.*?)`/g, '<code>$1</code>');
+    return text;
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
   function updateAssistantMessage(text) {
-    const thinking = document.querySelector('.message-assistant.thinking');
-    if (thinking) {
-      thinking.classList.remove('thinking');
-      thinking.innerHTML = `<div>${escapeHtml(text)}</div><div class="message-timestamp">${new Date().toLocaleTimeString()}</div>`;
-      return;
-    }
-    appendMessage('assistant', text);
+      const thinking = document.querySelector('.message-assistant.thinking');
+      if (thinking) {
+          thinking.classList.remove('thinking');
+          const formatted = renderMarkdown(escapeHtml(text));
+          thinking.innerHTML = `<div>${formatted}</div><div class="message-timestamp">${new Date().toLocaleTimeString()}</div>`;
+          return;
+      }
+      appendMessage('assistant', text);
   }
 
   function updateLastUserMessage(text) {

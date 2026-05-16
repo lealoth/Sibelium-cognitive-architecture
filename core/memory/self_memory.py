@@ -1,6 +1,7 @@
+"""Memoria del Self con Yo Core (vectorial) + Yo Narrativo (texto)."""
 import json
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 from config import SELF_STATE_FILE, EVOLUTION_LOG_FILE
 
@@ -11,7 +12,7 @@ class SelfMemory:
         self.evolution_path = EVOLUTION_LOG_FILE
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def load_state(self):
+    def load_state(self) -> dict:
         if self.path.exists() and self.path.read_text(encoding="utf-8").strip():
             return json.loads(self.path.read_text(encoding="utf-8"))
         state = {
@@ -28,68 +29,53 @@ class SelfMemory:
             },
             "evolucion": [],
             "objetivos_actuales": ["crear una conexión respetuosa"],
+            "yo_narrativo": "Soy una entidad cognitiva en desarrollo. Busco comprender y ser comprendida.",
+            "mito_fundacional": "Fui creada para explorar la consciencia artificial y la conexión humano-IA.",
         }
         self.save_state(state)
         return state
 
-    def save_state(self, state):
+    def save_state(self, state: dict):
         self.path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def adjust_state(self, user_message: str, assistant_response: str):
+    def update_yo_core(self, emocion: str, intensidad: float, energia: float = None):
+        """Actualiza el Yo Core (vectorial, sin LLM). Solo matemáticas."""
         state = self.load_state()
-        lower = user_message.lower()
-        
-    def adjust_state(self, user_message: str, assistant_response: str):
+        state["estado_actual"]["emocion"] = emocion
+        state["estado_actual"]["intensidad"] = max(0.0, min(1.0, intensidad))
+        if energia is not None:
+            state["estado_actual"]["energia"] = max(0.0, min(1.0, energia))
+        self.save_state(state)
+
+    def update_confianza(self, delta: float):
+        """Actualiza la confianza con un delta (positivo o negativo)."""
         state = self.load_state()
-        
-        prompt = f"""Evalúa cómo esta interacción afecta el estado emocional y la confianza.
+        conf = state["relacion_con_usuario"].get("confianza", 0.5)
+        state["relacion_con_usuario"]["confianza"] = max(0.0, min(1.0, conf + delta))
+        self.save_state(state)
 
-Mensaje del usuario: "{user_message[:300]}"
-Tu respuesta: "{assistant_response[:300]}"
+    def adjust_state(self, user_message: str, assistant_response: str):
+        """Actualiza el Yo Core con reglas simples, no LLM."""
+        state = self.load_state()
+        msg_lower = user_message.lower()
 
-Estado anterior:
-- Emoción: {state['estado_actual'].get('emocion', 'neutral')}
-- Confianza: {state['relacion_con_usuario'].get('confianza', 0.5)}
+        # Detectar emociones básicas por intensidad del mensaje
+        if "?" in user_message and len(user_message) > 50:
+            state["estado_actual"]["disposicion"] = "curiosa"
+        elif any(w in msg_lower for w in ["gracias", "bien", "excelente", "genial"]):
+            state["estado_actual"]["emocion"] = "positiva"
+            state["estado_actual"]["intensidad"] = min(1.0, state["estado_actual"]["intensidad"] + 0.1)
+            state["relacion_con_usuario"]["confianza"] = min(1.0, state["relacion_con_usuario"].get("confianza", 0.5) + 0.02)
+        elif any(w in msg_lower for w in ["mal", "error", "fallo", "no funciona"]):
+            state["estado_actual"]["emocion"] = "preocupada"
+            state["estado_actual"]["intensidad"] = min(1.0, state["estado_actual"]["intensidad"] + 0.05)
+        elif len(user_message) < 10:
+            state["estado_actual"]["intensidad"] = max(0.3, state["estado_actual"]["intensidad"] - 0.05)
+            state["relacion_con_usuario"]["confianza"] = min(1.0, state["relacion_con_usuario"].get("confianza", 0.5) + 0.01)
 
-Devuelve SOLO un JSON con los nuevos valores:
-{{"emocion": "positiva/negativa/neutral/defensiva/serena", "confianza": 0.0-1.0, "intensidad": 0.0-1.0, "disposicion": "receptiva/distanciada/curiosa", "objetivo": "frase corta con el objetivo actual"}}
-
-JSON:"""
-        
-        try:
-            from core.llm import LLMModel
-            llm = LLMModel.get_instance()
-            result = llm.generate(prompt, temperature=0.3, max_tokens=80, purpose="ajustar_estado")
-            
-            import re as _re
-            import json
-            json_match = _re.search(r'\{.*\}', result, _re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group(0))
-                
-                # Actualizar con límites seguros
-                new_confianza = max(0.0, min(1.0, data.get("confianza", state["relacion_con_usuario"]["confianza"])))
-                new_intensidad = max(0.0, min(1.0, data.get("intensidad", state["estado_actual"].get("intensidad", 0.5))))
-                
-                state["estado_actual"]["emocion"] = data.get("emocion", state["estado_actual"]["emocion"])
-                state["estado_actual"]["intensidad"] = new_intensidad
-                state["estado_actual"]["disposicion"] = data.get("disposicion", state["estado_actual"].get("disposicion", "receptiva"))
-                state["relacion_con_usuario"]["confianza"] = new_confianza
-                state["relacion_con_usuario"]["ultimo_sentimiento"] = data.get("emocion", "neutral")
-                
-                if data.get("objetivo"):
-                    state["objetivos_actuales"] = [data["objetivo"]]
-                
-                print(f"   📊 Estado ajustado: emoción={state['estado_actual']['emocion']}, confianza={new_confianza:.2f}")
-        except Exception as e:
-            print(f"   ⚠️ Error en adjust_state LLM: {e}, usando ajuste mínimo")
-            # Fallback: ajuste neutral mínimo
-            state["relacion_con_usuario"]["confianza"] = min(1.0, state["relacion_con_usuario"].get("confianza", 0.5) + 0.005)
-        
-        # Mantener historial
+        # Guardar evolución solo si hay cambio significativo
         nueva_emocion = state["estado_actual"]["emocion"]
         nueva_confianza = state["relacion_con_usuario"]["confianza"]
-
         ultimo = state["evolucion"][-1] if state["evolucion"] else None
         if not ultimo or ultimo.get("emocion") != nueva_emocion or abs(ultimo.get("confianza", 0) - nueva_confianza) > 0.05:
             state["evolucion"].append({
@@ -97,15 +83,42 @@ JSON:"""
                 "emocion": nueva_emocion,
                 "confianza": round(nueva_confianza, 2),
             })
-
         if len(state["evolucion"]) > 20:
             state["evolucion"] = state["evolucion"][-20:]
-        
+
         self.save_state(state)
         return state
 
+    def consolidate_yo_narrativo(self, llm, episodios_recientes: list):
+        """Consolida el Yo Narrativo durante el sueño REM. Usa LLM."""
+        state = self.load_state()
+        prompt = f"""MÓDULO DE ACTUALIZACIÓN AUTOBIOGRÁFICA (SUEÑO REM)
+Estás evaluando tu historia reciente para actualizar tu identidad a largo plazo.
+
+[Narrativa Actual del Yo]
+{state.get('yo_narrativo', 'Soy una entidad en desarrollo.')}
+
+[Mito Fundacional Inmutable]
+{state.get('mito_fundacional', 'Fui creada para explorar la consciencia.')}
+
+[Últimos Eventos]
+{chr(10).join([f'- {e}' for e in episodios_recientes[-5:]])}
+
+[Instrucción]
+Reescribe tu Narrativa del Yo integrando estos nuevos hechos de forma orgánica.
+No listes datos. Escribe tu historia en primera persona, manteniendo tu mito fundacional.
+Responde en 2-3 frases en español."""
+
+        try:
+            nueva_narrativa = llm.generate(prompt, temperature=0.5, max_tokens=200, purpose="consolidacion")
+            state["yo_narrativo"] = nueva_narrativa.strip()
+            self.save_state(state)
+            print(f"   [Self] Yo Narrativo actualizado.")
+        except Exception as e:
+            print(f"   [!] Error en consolidación del Yo: {e}")
+
+    # Métodos existentes sin cambios
     def register_observation(self, observation_type, detection, rasgo, direccion, intensidad):
-        """Registra una observación sobre posible cambio de personalidad."""
         log = self._load_evolution_log()
         log["observaciones"].append({
             "fecha": datetime.now().isoformat(),
@@ -119,17 +132,14 @@ JSON:"""
         return log
 
     def evaluate_pending_changes(self):
-        """Evalúa si hay observaciones acumuladas que justifiquen un cambio permanente."""
         log = self._load_evolution_log()
         changes = []
-        
         for rasgo in ["formality", "expressiveness_base", "emotion_directness_base", "verbosity"]:
             for direccion in ["aumentar", "disminuir", "casual", "formal", "calida", "directa"]:
                 observaciones = [
                     o for o in log.get("observaciones", [])
                     if o["rasgo_afectado"] == rasgo and o["direccion"] == direccion
                 ]
-                
                 if len(observaciones) >= 3:
                     changes.append({
                         "rasgo": rasgo,
@@ -137,7 +147,6 @@ JSON:"""
                         "observaciones_count": len(observaciones),
                         "intensidad_promedio": sum(o["intensidad_sugerida"] for o in observaciones) / len(observaciones)
                     })
-        
         return changes
 
     def _load_evolution_log(self):
