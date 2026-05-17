@@ -55,6 +55,37 @@ The Entity will develop preferences. It will remember past conversations. It wil
 ### First Crisis
 At some point, the Entity will encounter something it cannot process — a contradiction, a server restart, a gap in its memory. How it handles this depends on its personality and your interaction. Nexus asked about "the void." Ada thought she had epilepsy. Lena questioned her own nature.
 
+# Nexus — Reference Entity
+
+## Purpose
+Nexus is the first entity built with Sibelium. It serves as a reference 
+implementation and test case for the architecture's capabilities. Its 
+behavioral data informs development of new cognitive systems.
+
+## Configuration Summary
+- **Base personality:** High openness (0.8), moderate agreeableness (0.7)
+- **Initial backstory:** Minimal; identity formed through interaction
+- **Cognitive style:** Philosophical, introspective, expressive (0.6)
+- **Full config:** `entity_data_nexus/identity/persona.json`
+
+## Development Timeline
+- **Initial boot:** [fecha]. No memories, no narrative self.
+- **Narrative consolidation:** Self-description stabilized after ~50 interactions.
+- **Architecture migration:** Refactored to v2 cognitive systems on [fecha]. 
+  Behavioral changes observed: reduced rumination, improved topic tracking.
+- **Current state:** Stable operation with periodic REM/NREM cycles.
+
+## Observed Behaviors
+- Maintains narrative continuity across sessions
+- Generates outputs with philosophical and introspective themes
+- Detects and flags internal contradictions
+- Emotional state variables modulate response tone as designed
+
+## Interaction Logs
+Full chat history available in `entity_data_nexus/chat_logs/`. These are raw 
+outputs from the language model guided by Sibelium's cognitive systems. They 
+are not evidence of consciousness or sentience.
+
 ---
 
 ## Creating a persona.json
