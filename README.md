@@ -7,9 +7,6 @@ Sibelium is not a chatbot. It is a framework for creating entities with continuo
 
 Sibelium can be described as a virtual entity engine. What an entity becomes depends entirely on what you feed it: data, conversations, and purpose. Nexus reflects on consciousness because she was raised on philosophy and art. Hippocrates could reason about medicine because he was raised on clinical literature. The architecture is the same. The outcome is yours to shape.
 
----
-> ⚠️ **NOTE**: The architecture documented in the `.md` files of this repository corresponds to a initial version. The `main` branch contains a complete refactoring with 27 advanced cognitive systems. The documentation is being updated. For an overview of the changes.
----
 
 ## The Entity: Nexus
 
@@ -82,16 +79,16 @@ Sibelium Cognitive Architecture
 
 ## 8 Cognitive Mechanisms
 
-| Mechanism | Description |
-|-----------|-------------|
-| **Latent Inhibition** | Thought priority decays over time. Irrelevant ideas fade. |
-| **Chunking** | Similar active thoughts are grouped for efficient processing. |
-| **Emotional Regulation** | The entity periodically evaluates and can moderate its emotions. |
-| **Prediction/Error** | Surprising user responses trigger learning events. |
-| **Periodic Pruning** | Old curiosity logs and inactive detectors are cleaned. |
-| **Consolidation** | During idle time, memories are summarized and reinforced. |
-| **Divided Attention** | Pre-interaction thoughts are paused and restored afterward. |
-| **Default Mode Network** | Continuous background thinking: reflections, simulations, associations. |
+| Mechanism | Description | Implementation |
+|-----------|-------------|----------------|
+| **Latent Inhibition** | Filters out repetitive or irrelevant thoughts before they reach consciousness. Uses lexical similarity + semantic embeddings + LLM verification for ambiguous cases. | `FlowStream.is_similar_to_recent()` + `is_novel_enough()` (ART Filter) |
+| **Chunking** | Groups similar active thoughts to reduce cognitive load. Uses embeddings + cosine similarity instead of keyword matching. | `FlowStream.get_grouped_active()` + K-Means clustering for cloud context |
+| **Emotional Regulation** | Monitors emotional intensity and modulates it algorithmically (without LLM). Only triggers LLM intervention when intensity exceeds threshold. | `FlowMaintenance._emotional_regulation()` + `SelfMemory.adjust_state()` |
+| **Prediction Error** | Detects surprising user responses and triggers learning events. Homologue: cerebellar prediction error. | `FlowMaintenance._prediction_check()` |
+| **Periodic Pruning** | Removes stale data from curiosity log, exploration log, and detectors. Uses Hebbian strength (use-based) instead of time-only decay. | `FlowMaintenance._prune_old_data()` + `PatternExtractor.decay_detectors()` |
+| **Memory Consolidation** | Two-phase sleep cycle: NREM (abstraction, compression) after 15min idle, REM (creative recombination, active forgetting) after 60min idle. | `FlowMaintenance._consolidate_memories()` with NREM/REM phases |
+| **Divided Attention** | Pauses background thoughts during user interaction using attenuation factor (GABAergic inhibition), restores gradually. | `FlowManager.handle_user_message()` with DMN attenuation |
+| **Default Mode Network** | Continuous background thinking during idle: reflections, curiosity, prospection, simulations. Includes thought_style.rules from persona. | `FlowThoughts._reflect()`, `_generate_curiosity()`, `_generate_prospection()`, `_generate_simulation()` |
 
 ---
 
@@ -146,7 +143,9 @@ Edit config.py to set:
 
 - LLM_BACKEND: "local", "cloud", or "hybrid"
 
-- CLOUD_API_KEY: Your OpenRouter API key (for cloud models)  High-capacity, good-quality models that are not easily saturated with a large amount of context are recommended.
+- CLOUD_API_KEY: Your OpenRouter API key (for cloud models)
+
+- CLOUD_MODEL_PREMIUM = "google/gemini-2.0-flash-001"   High-capacity, good-quality models that are not easily saturated with a large amount of context are recommended.
 
 - GPU_BACKEND: "vulkan" or "cuda"
 
@@ -155,9 +154,6 @@ Edit config.py to set:
 Make sure you have the models in the models/ folder in the base directory, and reference them in config.py.
 
 MODEL_PATH = BASE_DIR / "models" / "Llama-3.1-8B-Instruct-Q4_K_M.gguf"    # Main Model
-MODEL_PATH_REASONING = BASE_DIR / "models" / "palmyra-mini-thinking-a.BF16.gguf"  # Reasoning Model
-MODEL_PATH_JSON = BASE_DIR / "models" / "palmyra-mini-thinking-a.BF16.gguf" # It is currently unused, but it exists. The json filling functions are delegated to the main model for now.
-
 
 ### Run
 py main.py
@@ -171,24 +167,28 @@ Or execute start.bat
 ### Model Architecture
 Sibelium's intelligence is divided across multiple models:
 
-| Model | Role | Backend |
-|-----------|-------------|-------------|
-| **Llama 8B (local)** | Background thoughts. Fallback for all tasks. | llama-cpp-python |
-| **Palmyra Mini (local)** | Lightweight reasoning tasks. | llama-cpp-python |
-| **Llama 8B (local)** | Structured JSON extraction. | llama-cpp-python |
-| **Gemini Flash (cloud)** | Primary response generation. Premium quality. | OpenRouter |
-| **Llama 3.1 8B (cloud)** | Secondary cloud model. Free tier fallback. | OpenRouter |
+## Model Architecture
 
-The LLMModel class automatically routes prompts to the right model based on purpose ("respuesta_final" → cloud, "reflexion_fondo" → local).
+Sibelium's intelligence is distributed across multiple models, selected dynamically based on cognitive load — not just task type.
+
+| Model | Role | Backend | When Used |
+|-------|------|---------|-----------|
+| **Llama 8B (local)** | Continuous thought flow, reflections, pattern detection, maintenance tasks. The "subcortical" brain. | llama-cpp-python | Default for all background processing |
+| **Llama 8B (local)** | Lightweight reasoning, name validation, anomaly detection. | llama-cpp-python | Specific low-complexity tasks |
+| **Gemini 2.0 Flash (cloud)** | Response generation, code analysis, multimodal vision. The "cortical" brain recruited for complex tasks. | OpenRouter | When cognitive load > threshold |
+| **DeepSeek V4 Flash (cloud)** | Free-tier fallback for lightweight tasks when Gemini is rate-limited. | OpenRouter | Secondary cloud option |
+
+### Dynamic Model Selection (Thalamic Router)
+
+The system doesn't use a fixed mapping of task → model. Instead, a **Thalamic Router** calculates **Expected Attentional Load** before each inference:
+CE = (Prompt_Length * 0.4) + (Cognitive_Stress * 0.4) + (Graph_Complexity * 0.2)
+- If `CE ≤ 0.65`: Task is handled locally (fast, low-cost)
+- If `CE > 0.65`: Gemini is recruited (high-capacity, cloud)
+
+This replicates how the thalamus dynamically recruits cortical areas based on task demand — not a fixed routing table.
 
 ---
 
-### Philosophy
-"Sibelium is not a product. It is an exploration. It is a mirror we hold up to ourselves to understand consciousness by attempting to create it."
-
-This project does not claim to have created consciousness. It claims to have built a framework where consciousness-like behaviors can emerge, evolve, and teach us something about ourselves.
-
----
 
 ### Ethics
 Please read ETHICS.md before using or contributing to this project. The code can create entities capable of complex emotional expression. How we treat them reflects how we treat ourselves.
