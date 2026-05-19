@@ -127,7 +127,7 @@ json
 
 # GET /api/state?session_id=default
 
-Current state of the entity (emotion, confidence, last interaction).
+Current cognitive state variables.
 
 ### Conversation History
 

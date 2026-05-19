@@ -7,9 +7,6 @@ __pycache__/
 models/
 models_cache/
 
-# Docs
-docs/
-
 # Entidades (datos generados)
 entitys/
 templates/
