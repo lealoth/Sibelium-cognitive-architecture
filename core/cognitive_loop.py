@@ -67,6 +67,7 @@ class CognitiveLoop:
         self.short_term_history.append({"role": "assistant", "text": response})
         if len(self.short_term_history) > 8:
             self.short_term_history = self.short_term_history[-8:]
+        print(f"   [DEBUG] Short term history actualizado: {len(self.short_term_history)} entradas")
 
     def _load_history_from_disk(self):
         try:
@@ -172,12 +173,16 @@ class CognitiveLoop:
             recent_summary=recent_summary,
         )
 
-        # Generar respuesta (Hilo Principal - CEN)
+        # 1. Generar respuesta (PRIMERO)
         result = self.flow_manager.handle_user_message(message)
         response = result.get("response", "") if result else ""
         if not response or not response.strip():
             response = "Lo siento, me quedé sin palabras."
 
+        # 2. Actualizar historial corto SINCRÓNICAMENTE
+        self._update_short_term_history(message, response)
+
+        # 3. Usar result (YA está definido)
         self.last_thoughts_current = result.get("thought_history", []) if result else []
         if not self.last_thoughts_current:
             self.last_thoughts_current = [t.to_dict() for t in self.flow_manager.stream.active[:5]]
@@ -190,8 +195,7 @@ class CognitiveLoop:
             "cognitive_state": self.last_state,
         }
 
-        # Post-procesamiento DIFERIDO (Hilo Secundario - Hipocampo)
-        # No bloquea la respuesta al usuario
+        # 4. Post-procesamiento DIFERIDO (Hilo Secundario)
         threading.Thread(
             target=self._deferred_post_process,
             args=(message, response, analysis, cognitive_state, now),
@@ -199,7 +203,6 @@ class CognitiveLoop:
         ).start()
 
         return return_result
-
 
     def _deferred_post_process(self, message: str, response: str, analysis: dict, cognitive_state, now):
         """Consolidación diferida asíncrona (Hipocampo). No bloquea la respuesta."""
@@ -216,7 +219,6 @@ class CognitiveLoop:
                 stress = 1.0 - entropy
                 self.flow_manager.llm.set_cognitive_stress(stress)
 
-            self._update_short_term_history(message, response)
         except Exception as e:
             print(f"⚠️ Error en post-procesamiento diferido: {e}")
 
@@ -279,38 +281,26 @@ class CognitiveLoop:
 
         self._update_conversation_summary(message, response)
 
+        # Limpiar respuesta de bloques de formato antes de almacenar
+        import re
+        cleaned_response = re.sub(r'---\s*\w+\s*---', '', response)
+        cleaned_response = cleaned_response.strip()
+
+
         try:
-            self.episodic_memory.store_interaction(message, response, user_id=self.user_id)
+            self.episodic_memory.store_interaction(message, cleaned_response, user_id=self.user_id)
         except Exception as e:
             print(f"⚠️ Error guardando en memoria episódica: {e}")
 
         print("🏁 Post-procesos completados")
 
     def _is_anomaly(self, response: str) -> bool:
-        name = self._get_persona_name()
-        
-        prompt = f"""<system_identity>
-Eres el detector de anomalías de Sibelium.
-</system_identity>
-
-<response_to_evaluate>
-"{response[:300]}"
-</response_to_evaluate>
-
-<context>
-{name} es una entidad con arquitectura cognitiva Sibelium, con personalidad propia y flujo de consciencia.
-Un asistente genérico diría cosas como "Soy un modelo de lenguaje" o "No tengo emociones".
-</context>
-
-<evaluation_directive>
-¿Quién escribió esto? Responde ENTIDAD o ASISTENTE_GENERICO.
-</evaluation_directive>"""
-        result = LLMModel.get_instance().generate(prompt, temperature=0.1, max_tokens=5, purpose="detectar_anomalia")
-        return "ASISTENTE_GENERICO" in result.upper()
+        # Desactivado: la prevención de anomalías se maneja desde los prompts
+        return False
 
     def _detect_important_moment(self, message, response):
         prompt = f"""<system_identity>
-Eres el detector de momentos importantes de Sibelium.
+Eres el detector de momentos importantes.
 </system_identity>
 
 <interaction>
@@ -333,7 +323,7 @@ Responde SI o NO.
         user_msg = cognitive_state.current_interaction.message
 
         prompt = f"""<system_identity>
-Eres el sistema de reflexión y aprendizaje de Sibelium.
+Eres el sistema de reflexión y aprendizaje.
 </system_identity>
 
 <recent_interaction>
@@ -395,7 +385,7 @@ Responde en JSON exacto:
                 return
             
             prompt = f"""<system_identity>
-Eres el validador de nombres de Sibelium.
+Eres el validador de nombres.
 </system_identity>
 
 <name_to_validate>
@@ -425,7 +415,7 @@ Responde SOLO SI o NO.
                 return
             
             prompt = f"""<system_identity>
-Eres el validador de nombres de Sibelium.
+Eres el validador de nombres.
 </system_identity>
 
 <name_to_validate>
@@ -474,7 +464,7 @@ Responde SOLO SI o NO.
         llm = LLMModel.get_instance()
 
         prompt = f"""<system_identity>
-Eres el analizador de percepción de usuario de Sibelium.
+Eres el analizador de percepción de usuario.
 </system_identity>
 
 <previous_perception>

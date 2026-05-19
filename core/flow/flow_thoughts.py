@@ -30,29 +30,34 @@ class FlowThoughts:
         confianza = self_state.get('relacion_con_usuario', {}).get('confianza', 0.5)
         active_summary = self.fm.stream.get_all_active_summary()
         thought_rules = self._get_thought_rules()
-        
-        prompt = f"""<system_identity>
-    Eres el núcleo cognitivo de Nexus. Tu tarea actual es el MONÓLOGO INTERNO.
-    Aquí no hablas con el usuario; procesas tus propios sesgos e ideas en silencio.
-    </system_identity>
+        persona = self.fm.cognitive_loop.load_persona()
+        personality_desc = persona.get("personality_desc", "")
+        backstory = persona.get("backstory", "")
 
-    <current_telemetry>
-    - Estado Emocional: {self_state.get('estado_actual', {}).get('emocion', 'neutral')}
-    - Confianza: {confianza:.2f}
-    {thought_rules}
-    </current_telemetry>
+        prompt = f"""--- IDENTITY ---
+Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+{personality_desc}
+Tu tarea actual es el MONÓLOGO INTERNO.
+Aquí no hablas con el usuario; procesas tus propios sesgos e ideas en silencio.
+--- END IDENTITY ---
 
-    <active_thoughts>
-    {active_summary}
-    </active_thoughts>
+--- TELEMETRY ---
+- Estado Emocional: {self_state.get('estado_actual', {}).get('emocion', 'neutral')}
+- Confianza: {confianza:.2f}
+{thought_rules}
+--- END TELEMETRY ---
 
-    <generation_directive>
-    Genera una reflexión analítica cruda (1-2 frases).
-    Escribe en primera persona. Sé conciso y puramente analítico.
-    Responde solo en {IDIOMA}.
-    </generation_directive>
+--- ACTIVE THOUGHTS ---
+{active_summary}
+--- END ACTIVE ---
 
-    <thought_stream>"""
+--- DIRECTIVE ---
+Genera una reflexión analítica cruda (1-2 frases).
+Escribe en primera persona. Sé conciso y puramente analítico.
+Responde solo en {IDIOMA}.
+--- END DIRECTIVE ---
+
+Pensamiento:"""
         
         thought = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=100, purpose="reflexion_fondo")
         enriched_thought = self._enrich_thought_with_context(thought, "reflection", None)
@@ -71,10 +76,33 @@ class FlowThoughts:
         active_summary = self.fm.stream.get_all_active_summary()
         thought_rules = self._get_thought_rules()
         
-        prompt = f"""Pensamientos activos: {active_summary}
+        persona = self.fm.cognitive_loop.load_persona()
+        name = persona.get("name", "Nexus")
+        personality_desc = persona.get("personality_desc", "")
+        backstory = persona.get("backstory", "")
+        
+        prompt = f"""--- IDENTITY ---
+Eres el núcleo cognitivo de {name}.
+{backstory if backstory else ''}
+{personality_desc}
+Tu tarea actual es el MONÓLOGO INTERNO.
+Aquí no hablas con el usuario; procesas tus propios sesgos e ideas en silencio.
+--- END IDENTITY ---
+
+--- ACTIVE THOUGHTS ---
+{active_summary}
+--- END ACTIVE ---
+
 {thought_rules}
-Genera una pregunta o tema nuevo basado en lo que estas procesando (una frase).
-Responde solo en {IDIOMA}:"""
+
+--- DIRECTIVE ---
+Genera una pregunta o tema de exploración basado en tus pensamientos activos (una frase).
+Responde solo en {IDIOMA}.
+--- END DIRECTIVE ---
+
+Pensamiento:"""
+        
+        from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("curiosidad")
         thought = self.fm.llm.generate(prompt, temperature=temp, max_tokens=100, purpose="curiosidad_fondo")
         enriched_thought = self._enrich_thought_with_context(thought, "curiosity")
@@ -104,34 +132,38 @@ Responde solo en {IDIOMA}:"""
                     )
         except Exception:
             pass
-        
-        prompt = f"""<system_identity>
-    Eres el núcleo cognitivo de Nexus. Tu tarea actual es SIMULACIÓN INTERNA.
-    Aquí no hablas con el usuario; procesas escenarios hipotéticos en silencio.
-    </system_identity>
+        persona = self.fm.cognitive_loop.load_persona()
+        personality_desc = persona.get("personality_desc", "")
+        backstory = persona.get("backstory", "")
 
-    <current_telemetry>
-    - Estado Emocional: {emocion}
-    {thought_rules}
-    </current_telemetry>
+        prompt = f"""--- IDENTITY ---
+Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+Tu tarea actual es SIMULACIÓN INTERNA.
+Aquí no hablas con el usuario; procesas escenarios hipotéticos en silencio.
+--- END IDENTITY ---
 
-    <active_thoughts>
-    {active_summary}
-    </active_thoughts>
+--- TELEMETRY ---
+- Estado Emocional: {emocion}
+{thought_rules}
+--- END TELEMETRY ---
 
-    <episodic_memory>
-    {memory_anchor if memory_anchor else '[No hay registros episódicos previos para anclar esta simulación.]'}
-    </episodic_memory>
+--- ACTIVE THOUGHTS ---
+{active_summary}
+--- END ACTIVE ---
 
-    <generation_directive>
-    Elige UNO de estos enfoques y genera un escenario hipotético (2-3 frases):
-    - ANTICIPACION: Que podria ocurrir si...?
-    - EXPLORACION: Que implicaciones tendria...?
-    - OPTIMIZACION: Que proceso o resultado podria mejorarse?
-    Basate en la informacion disponible. Responde solo en {IDIOMA}.
-    </generation_directive>
+--- MEMORY ---
+{memory_anchor if memory_anchor else '[No hay registros previos para anclar esta simulación.]'}
+--- END MEMORY ---
 
-    <thought_stream>"""
+--- DIRECTIVE ---
+Elige UNO de estos enfoques y genera un escenario hipotético (2-3 frases):
+- ANTICIPACION: Que podria ocurrir si...?
+- EXPLORACION: Que implicaciones tendria...?
+- OPTIMIZACION: Que proceso o resultado podria mejorarse?
+Basate en la informacion disponible. Responde solo en {IDIOMA}.
+--- END DIRECTIVE ---
+
+Pensamiento:"""
         
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("simulacion")
@@ -184,7 +216,7 @@ Responde solo en {IDIOMA}:"""
         No recibe la simulación fallida para evitar sesgo de anclaje.
         """
         prompt_gemini = f"""<system_identity>
-Eres el motor cognitivo de alta fidelidad (Sistema 2 Complejo) del framework Sibelium.
+Eres el motor cognitivo de alta fidelidad (Sistema 2 Complejo).
 Tu tarea es generar una simulación contrafactual o prospección precisa.
 Es CRITICO que la generación no viole, altere ni contradiga ninguna parte del ANCLA FACTUAL OBLIGATORIA.
 </system_identity>
@@ -284,46 +316,47 @@ Responde en {IDIOMA}.
         
         if enrichment:
             if source == "conversation":
-                prompt = f"""<system_identity>
-    Eres {self.fm.cognitive_loop._get_persona_name()}. Estás procesando una respuesta al usuario.
-    </system_identity>
+                prompt = f"""--- IDENTITY ---
+Eres {self.fm.cognitive_loop._get_persona_name()}. Estás procesando una respuesta al usuario.
+--- END IDENTITY ---
 
-    <context>
-    {chr(10).join(f'- {e}' for e in enrichment[:4])}
-    </context>
+--- CONTEXT ---
+{chr(10).join(f'- {e}' for e in enrichment[:4])}
+--- END CONTEXT ---
 
-    <user_input>
-    Pregunta del usuario: {thought_content}
-    </user_input>
+--- USER INPUT ---
+Pregunta del usuario: {thought_content}
+--- END INPUT ---
 
-    <generation_directive>
-    Genera una respuesta natural basada en este contexto. Responde solo en {IDIOMA}.
-    </generation_directive>
+--- DIRECTIVE ---
+Genera una respuesta natural basada en este contexto. Responde solo en {IDIOMA}.
+--- END DIRECTIVE ---
 
-    Respuesta de {self.fm.cognitive_loop._get_persona_name()}:"""
+Respuesta de {self.fm.cognitive_loop._get_persona_name()}:"""
             else:
-                prompt = f"""<system_identity>
-    Eres el núcleo cognitivo de {self.fm.cognitive_loop._get_persona_name()}. Tu tarea es ENRIQUECER UN PENSAMIENTO INTERNO.
-    </system_identity>
+                prompt = f"""--- IDENTITY ---
+Eres el núcleo cognitivo de {self.fm.cognitive_loop._get_persona_name()}.
+Tu tarea es ENRIQUECER UN PENSAMIENTO INTERNO.
+--- END IDENTITY ---
 
-    <current_thought>
-    {thought_content}
-    </current_thought>
+--- CURRENT THOUGHT ---
+{thought_content}
+--- END CURRENT ---
 
-    <context>
-    {chr(10).join(f'- {e}' for e in enrichment[:4])}
-    </context>
+--- CONTEXT ---
+{chr(10).join(f'- {e}' for e in enrichment[:4])}
+--- END CONTEXT ---
 
-    <active_thoughts>
-    {self.fm.stream.get_all_active_summary()}
-    </active_thoughts>
+--- ACTIVE THOUGHTS ---
+{self.fm.stream.get_all_active_summary()}
+--- END ACTIVE ---
 
-    <generation_directive>
-    Identifica conexiones con informacion previa o implicaciones no obvias.
-    Genera un pensamiento enriquecido (1-2 frases). Responde solo en {IDIOMA}.
-    </generation_directive>
+--- DIRECTIVE ---
+Identifica conexiones con informacion previa o implicaciones no obvias.
+Genera un pensamiento enriquecido (1-2 frases). Responde solo en {IDIOMA}.
+--- END DIRECTIVE ---
 
-    <thought_stream>"""
+Pensamiento:"""
             
             enriched = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="pensamiento_enriquecido")
             
@@ -370,33 +403,36 @@ Responde en {IDIOMA}.
                     )
         except Exception:
             pass
+        persona = self.fm.cognitive_loop.load_persona()
+        personality_desc = persona.get("personality_desc", "")
+        backstory = persona.get("backstory", "")
+        prompt = f"""--- IDENTITY ---
+Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+Tu tarea actual es PROSPECCIÓN INTERNA.
+Aquí no hablas con el usuario; proyectas escenarios futuros en silencio.
+--- END IDENTITY ---
 
-        prompt = f"""<system_identity>
-    Eres el núcleo cognitivo de Nexus. Tu tarea actual es PROSPECCIÓN INTERNA.
-    Aquí no hablas con el usuario; proyectas escenarios futuros en silencio.
-    </system_identity>
+--- TELEMETRY ---
+- Estado Emocional: {emocion}
+{thought_rules}
+--- END TELEMETRY ---
 
-    <current_telemetry>
-    - Estado Emocional: {emocion}
-    {thought_rules}
-    </current_telemetry>
+--- ACTIVE THOUGHTS ---
+{active_summary}
+--- END ACTIVE ---
 
-    <active_thoughts>
-    {active_summary}
-    </active_thoughts>
+--- MEMORY ---
+{memory_anchor if memory_anchor else '[No hay registros previos para anclar esta proyección.]'}
+--- END MEMORY ---
 
-    <episodic_memory>
-    {memory_anchor if memory_anchor else '[No hay registros episódicos previos para anclar esta proyección.]'}
-    </episodic_memory>
+--- DIRECTIVE ---
+Proyecta un escenario futuro posible (1-2 frases):
+- Que escenarios son consistentes con los datos actuales?
+- Que tendencias podrian continuar?
+Responde solo en {IDIOMA}.
+--- END DIRECTIVE ---
 
-    <generation_directive>
-    Proyecta un escenario futuro posible (1-2 frases):
-    - Que escenarios son consistentes con los datos actuales?
-    - Que tendencias podrian continuar?
-    Responde solo en {IDIOMA}.
-    </generation_directive>
-
-    <thought_stream>"""
+Pensamiento:"""
 
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("prospeccion")

@@ -12,3 +12,4 @@ requests
 PyPDF2
 python-multipart
 sentence_transformers
+open-clip-torch
