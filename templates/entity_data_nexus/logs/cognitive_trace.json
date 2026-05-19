@@ -1,0 +1,4 @@
+{"timestamp": "2026-05-13T16:19:11.117596", "purpose": "extraer_keywords", "backend": "main", "prompt_length": 315, "response_length": 55, "temperature": 0.2, "max_tokens": 50, "elapsed_seconds": 14.5}
+{"timestamp": "2026-05-13T16:19:54.987347", "purpose": "pensamiento_enriquecido", "backend": "main", "prompt_length": 1322, "response_length": 310, "temperature": 0.7, "max_tokens": 150, "elapsed_seconds": 39.21}
+{"timestamp": "2026-05-13T16:20:07.793035", "purpose": "busqueda_desde_pensamiento", "backend": "main", "prompt_length": 442, "response_length": 66, "temperature": 0.4, "max_tokens": 15, "elapsed_seconds": 12.81}
+{"timestamp": "2026-05-13T16:20:31.388046", "purpose": "reflexion_fondo", "backend": "main", "prompt_length": 332, "response_length": 170, "temperature": 0.7, "max_tokens": 100, "elapsed_seconds": 16.86}

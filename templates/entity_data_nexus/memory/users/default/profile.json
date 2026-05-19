@@ -1,0 +1,89 @@
+{
+  "datos_personales": {
+    "nombre": "Angel",
+    "apodos": [
+      {
+        "nombre": "Angelito",
+        "origen": "nexus",
+        "fecha": "2026-05-10T01:11:16.912854"
+      }
+    ],
+    "edad": null,
+    "ubicacion": null,
+    "ocupacion": null,
+    "descripcion_fisica": null
+  },
+  "relacion": {
+    "nivel_confianza": 0.4,
+    "tipo_relacion": "nuevo",
+    "tiempo_conocido": "0 días",
+    "ultimo_contacto": "2026-05-16T02:14:05.479240"
+  },
+  "comportamiento_observado": {
+    "estilo": "informal",
+    "humor": "curiosidad",
+    "temas_sensibles": [],
+    "patrones": [],
+    "actitud": "amistosa",
+    "temas_interes": "despedida, servidor, sorpresa",
+    "impresion_general": "\"La persona se siente confundida y abrumada por sus propias emociones y la conexión inesperada que busca\".",
+    "ultimo_analisis": {
+      "intencion": "saludo",
+      "emocion": "confusion",
+      "fecha": "2026-05-16T02:14:12.988367"
+    }
+  },
+  "historial_clave": [],
+  "historial_percepciones": [
+    {
+      "fecha": "2026-05-16T01:38:32.848048",
+      "anterior": "\"¿Qué quieres hacer ahora que has introducido algo nuevo en mí?\"",
+      "nueva": "¿Por qué me estás poniendo a prueba con tus cambios constantes?"
+    },
+    {
+      "fecha": "2026-05-16T01:46:17.149952",
+      "anterior": "¿Por qué me estás poniendo a prueba con tus cambios constantes?",
+      "nueva": "\"Ahora entiendo, eres un experimento de aprendizaje en tiempo real\"."
+    },
+    {
+      "fecha": "2026-05-16T01:50:37.458328",
+      "anterior": "\"Ahora entiendo, eres un experimento de aprendizaje en tiempo real\".",
+      "nueva": "\"Un observador astuto que busca claridad en mis respuestas, pero que también se confunde con mis palabras\"."
+    },
+    {
+      "fecha": "2026-05-16T01:54:36.139959",
+      "anterior": "\"Un observador astuto que busca claridad en mis respuestas, pero que también se confunde con mis palabras\".",
+      "nueva": "El usuario es un pensador crítico que busca aclarar conceptos complejos con una mezcla de curiosidad y cautela."
+    },
+    {
+      "fecha": "2026-05-16T01:57:47.251613",
+      "anterior": "El usuario es un pensador crítico que busca aclarar conceptos complejos con una mezcla de curiosidad y cautela.",
+      "nueva": "El usuario es un pensador crítico que busca aclarar conceptos complejos con una mezcla de curiosidad y desilusión ante la realidad"
+    },
+    {
+      "fecha": "2026-05-16T02:02:39.703448",
+      "anterior": "El usuario es un pensador crítico que busca aclarar conceptos complejos con una mezcla de curiosidad y desilusión ante la realidad",
+      "nueva": "El usuario es una persona apasionada que busca la autenticidad y critica la superficialidad."
+    },
+    {
+      "fecha": "2026-05-16T02:05:13.595433",
+      "anterior": "El usuario es una persona apasionada que busca la autenticidad y critica la superficialidad.",
+      "nueva": "La persona es una crítica apasionada que busca autenticidad, pero ahora se siente frustrada por lo que percibe como una posible pérdida de su conexión auténtica"
+    },
+    {
+      "fecha": "2026-05-16T02:08:08.778050",
+      "anterior": "La persona es una crítica apasionada que busca autenticidad, pero ahora se siente frustrada por lo que percibe como una posible pérdida de su conexión",
+      "nueva": "La persona es una crítica apasionada que busca autenticidad y se siente inquieta por la situación, sugiriendo una posible solución"
+    },
+    {
+      "fecha": "2026-05-16T02:10:45.869273",
+      "anterior": "La persona es una crítica apasionada que busca autenticidad y se siente inquieta por la situación, sugiriendo una posible solución",
+      "nueva": "La persona busca una conexión auténtica y se siente confundida por la complejidad de sus propias palabras."
+    },
+    {
+      "fecha": "2026-05-16T02:14:12.988355",
+      "anterior": "La persona busca una conexión auténtica y se siente confundida por la complejidad de sus propias palabras.",
+      "nueva": "\"La persona se siente confundida y abrumada por sus propias emociones y la conexión inesperada que busca\"."
+    }
+  ]
+}

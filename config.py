@@ -5,14 +5,14 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Modelo LLM
 MODEL_PATH = BASE_DIR / "models" / "Llama-3.1-8B-Instruct-Q4_K_M.gguf"    # Modelo principal local
-MODEL_PATH_REASONING = BASE_DIR / "models" / "palmyra-mini-thinking-a.BF16.gguf"  # Modelo de razonamiento local
-MODEL_PATH_JSON = BASE_DIR / "models" / "palmyra-mini-thinking-a.BF16.gguf" # modelo especializado en respuestas JSON local de poca complejidad / Debido a errores, todas sus funciones están temporalmente delegadas al llm local principal
+MODEL_PATH_REASONING = BASE_DIR / "models" / "Llama-3.1-8B-Instruct-Q4_K_M.gguf"  # Modelo de razonamiento local
+MODEL_PATH_JSON = BASE_DIR / "models" / "Llama-3.1-8B-Instruct-Q4_K_M.gguf" # modelo especializado en respuestas JSON local de poca complejidad / Debido a errores, todas sus funciones están temporalmente delegadas al llm local principal
 MODEL_CONTEXT_SIZE = 8192
 MODEL_THREADS = 8  # Ajustar según CPU
 MODEL_GPU_LAYERS = -1  # -1 = todas las capas en GPU si hay
 
 # Cuántas capas de cada modelo van a la GPU (-1 = todas, 0 = ninguna, N = número de capas)
-GPU_LAYERS_MAIN = 26       # La mitad de las ~32 capas de Llama 8B a GPU
+GPU_LAYERS_MAIN = 30       # La mitad de las ~32 capas de Llama 8B a GPU
 GPU_LAYERS_REASONING = 0   # Modelos pequeños a CPU
 GPU_LAYERS_JSON = 0        # Modelos pequeños a CPU
 
@@ -23,9 +23,9 @@ GPU_BACKEND = "vulkan"
 LLM_BACKEND = "hybrid"
 
 # Cloud API (compatible con OpenAI)
-CLOUD_API_KEY = "your-api-key-here"  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
-CLOUD_MODEL_PREMIUM = "google/gemini-2.0-flash-001" # Modelo premium en la nube para tareas complejas o cuando el local no es suficiente, se recomienda usar un modelo con buena capacidad de razonamiento y comprensión contextual para complementar al local
+CLOUD_API_KEY = "your-api-key"  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
 CLOUD_MODEL_FREE = "deepseek/deepseek-v4-flash:free" # Modelo gratuito en la nube para tareas simples o como respaldo cuando el premium no está disponible
+CLOUD_MODEL_PREMIUM = "google/gemini-2.0-flash-001" # Modelo premium en la nube para tareas complejas o cuando el local no es suficiente, se recomienda usar un modelo con buena capacidad de razonamiento y comprensión contextual para complementar al local
 CLOUD_API_URL = "https://openrouter.ai/api/v1"  # o "https://api.openai.com", etc.
 
 # Personalidad
@@ -52,7 +52,7 @@ RESPONSE_TEMPERATURE = 0.7
 MAX_VERIFICATION_RETRIES = 1
 
 # Archivos de datos
-ENTITY_DATA_DIR = BASE_DIR / "entitys" / "entity_data_default"
+ENTITY_DATA_DIR = BASE_DIR / "entitys" / "entity_data_nexus"  # Cambia "entity_data_nexus" por "entity_data_ada" para la otra entidad
 PERSONA_FILE = ENTITY_DATA_DIR / "identity" / "persona.json"
 USERS_DIR = ENTITY_DATA_DIR / "memory" / "users"
 SELF_STATE_FILE = ENTITY_DATA_DIR / "memory" / "self_state.json"
@@ -74,3 +74,10 @@ PROACTIVE_MESSAGES_ENABLED = False
 PROACTIVE_COOLDOWN_MINUTES = 120  # Minutos mínimos desde el último mensaje del usuario
 PROACTIVE_QUIET_HOURS_START = 22  # Hora en que deja de enviar mensajes (22 = 10 PM)
 PROACTIVE_QUIET_HOURS_END = 8     # Hora en que vuelve a enviar mensajes (8 = 8 AM)
+
+# Mods activos
+ENABLED_MODS = []  # ["self_engineer"] para activar
+# ENABLED_MODS_NEXUS = ["director", "team_channel", "self_engineer"]
+# ENABLED_MODS_ADA = ["team_channel", "self_engineer"]
+
+EXPERIMENTAL_MONITOR = False
