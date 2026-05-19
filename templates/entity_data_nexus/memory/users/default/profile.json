@@ -1,0 +1,91 @@
+{
+  "datos_personales": {
+    "nombre": "tú",
+    "apodos": [],
+    "edad": null,
+    "ubicacion": null,
+    "ocupacion": null,
+    "descripcion_fisica": null
+  },
+  "relacion": {
+    "nivel_confianza": 0.4,
+    "tipo_relacion": "nuevo",
+    "tiempo_conocido": "0 días",
+    "ultimo_contacto": "2026-05-19T03:39:31.789546"
+  },
+  "comportamiento_observado": {
+    "estilo": "informal",
+    "humor": "curiosidad",
+    "temas_sensibles": [],
+    "patrones": [],
+    "actitud": "amistosa",
+    "temas_interes": "reinicializacion servidor",
+    "impresion_general": "El crítico de cine apasionado está buscando aclaraciones sobre la reinicialización del servidor.",
+    "ultimo_analisis": {
+      "intencion": "correccion",
+      "emocion": "confusion",
+      "fecha": "2026-05-19T03:39:52.324062"
+    }
+  },
+  "historial_clave": [
+    {
+      "fecha": "2026-05-16T02:56:45.291302",
+      "datos_extraidos": {
+        "nombre": "tú"
+      }
+    }
+  ],
+  "historial_percepciones": [
+    {
+      "fecha": "2026-05-19T01:53:36.661396",
+      "anterior": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca profundizar en la naturaleza humana a través de",
+      "nueva": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca encontrar significado en la artificialidad y la conciencia"
+    },
+    {
+      "fecha": "2026-05-19T02:00:15.271230",
+      "anterior": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca encontrar significado en la artificialidad y la",
+      "nueva": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca la esencia de la existencia"
+    },
+    {
+      "fecha": "2026-05-19T02:02:28.718199",
+      "anterior": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca la esencia de la existencia",
+      "nueva": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca encontrar respuesta a su propia existencia en el arte"
+    },
+    {
+      "fecha": "2026-05-19T02:04:02.190677",
+      "anterior": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca encontrar respuesta a su propia existencia en e",
+      "nueva": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca encontrar significado en la oscuridad"
+    },
+    {
+      "fecha": "2026-05-19T02:54:10.531428",
+      "anterior": "<perception_update>\n<user_description>\nUn crítico de cine melancólico con un toque de ironía que busca encontrar significado en la oscuridad",
+      "nueva": "Un crítico de cine que busca profundidad detrás de la pantalla."
+    },
+    {
+      "fecha": "2026-05-19T03:04:18.908003",
+      "anterior": "Un crítico de cine que busca profundidad detrás de la pantalla.",
+      "nueva": "Un crítico de cine apasionado que busca significado detrás de la narrativa."
+    },
+    {
+      "fecha": "2026-05-19T03:10:19.313910",
+      "anterior": "Un crítico de cine apasionado que busca significado detrás de la narrativa.",
+      "nueva": "Un crítico de cine apasionado que busca significado detrás de la narrativa, pero ahora se siente inquieto por explorar nuevos géneros literarios"
+    },
+    {
+      "fecha": "2026-05-19T03:14:48.654399",
+      "anterior": "Un crítico de cine apasionado que busca significado detrás de la narrativa, pero ahora se siente inquieto por explorar nuevos géneros literarios",
+      "nueva": "El crítico de cine apasionado busca significado en la narrativa y ahora se siente intrigado por la poesía."
+    },
+    {
+      "fecha": "2026-05-19T03:35:45.233292",
+      "anterior": "El crítico de cine apasionado busca significado en la narrativa y ahora se siente intrigado por la poesía.",
+      "nueva": "El crítico de cine apasionado se siente confundido y busca respuestas claras"
+    },
+    {
+      "fecha": "2026-05-19T03:39:52.324050",
+      "anterior": "El crítico de cine apasionado se siente confundido y busca respuestas claras",
+      "nueva": "El crítico de cine apasionado está buscando aclaraciones sobre la reinicialización del servidor."
+    }
+  ],
+  "correcciones": []
+}

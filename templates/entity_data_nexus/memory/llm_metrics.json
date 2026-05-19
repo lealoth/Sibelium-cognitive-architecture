@@ -1,0 +1,355 @@
+{
+  "started_at": "2026-05-18T15:23:54.941137",
+  "total_calls": 1220,
+  "total_input_tokens": 364859,
+  "total_output_tokens": 71091,
+  "cache_hits": 20,
+  "by_backend": {
+    "main": {
+      "calls": 1200,
+      "input_tokens": 359008,
+      "output_tokens": 70455,
+      "total_time": 11547.524378299713
+    },
+    "cache": {
+      "calls": 20,
+      "input_tokens": 5851,
+      "output_tokens": 636,
+      "total_time": 0
+    }
+  },
+  "by_purpose": {
+    "reflexion_fondo": {
+      "calls": 37,
+      "input_tokens": 14406,
+      "output_tokens": 2147,
+      "total_time": 300.124653339386,
+      "by_backend": {
+        "main": {
+          "calls": 37,
+          "total_time": 300.124653339386
+        }
+      }
+    },
+    "extraer_keywords": {
+      "calls": 177,
+      "input_tokens": 12675,
+      "output_tokens": 2991,
+      "total_time": 762.2556693553925,
+      "by_backend": {
+        "main": {
+          "calls": 177,
+          "total_time": 762.2556693553925
+        }
+      }
+    },
+    "pensamiento_enriquecido": {
+      "calls": 172,
+      "input_tokens": 104302,
+      "output_tokens": 21454,
+      "total_time": 2816.8033788204193,
+      "by_backend": {
+        "main": {
+          "calls": 172,
+          "total_time": 2816.8033788204193
+        }
+      }
+    },
+    "analizar_usuario": {
+      "calls": 57,
+      "input_tokens": 3901,
+      "output_tokens": 836,
+      "total_time": 291.1630275249481,
+      "by_backend": {
+        "main": {
+          "calls": 57,
+          "total_time": 291.1630275249481
+        }
+      }
+    },
+    "extraer_patron": {
+      "calls": 34,
+      "input_tokens": 5317,
+      "output_tokens": 3044,
+      "total_time": 372.6088638305664,
+      "by_backend": {
+        "main": {
+          "calls": 34,
+          "total_time": 372.6088638305664
+        }
+      }
+    },
+    "evaluar_saliencia": {
+      "calls": 56,
+      "input_tokens": 6588,
+      "output_tokens": 56,
+      "total_time": 266.92638874053955,
+      "by_backend": {
+        "main": {
+          "calls": 56,
+          "total_time": 266.92638874053955
+        }
+      }
+    },
+    "curiosidad_fondo": {
+      "calls": 41,
+      "input_tokens": 15105,
+      "output_tokens": 2189,
+      "total_time": 226.66603565216064,
+      "by_backend": {
+        "main": {
+          "calls": 31,
+          "total_time": 226.66603565216064
+        },
+        "cache": {
+          "calls": 10,
+          "total_time": 0
+        }
+      }
+    },
+    "interpretar": {
+      "calls": 111,
+      "input_tokens": 16811,
+      "output_tokens": 7235,
+      "total_time": 1029.606333732605,
+      "by_backend": {
+        "main": {
+          "calls": 111,
+          "total_time": 1029.606333732605
+        }
+      }
+    },
+    "simulacion_fondo": {
+      "calls": 31,
+      "input_tokens": 15122,
+      "output_tokens": 3214,
+      "total_time": 532.5075147151947,
+      "by_backend": {
+        "main": {
+          "calls": 31,
+          "total_time": 532.5075147151947
+        }
+      }
+    },
+    "respuesta_final": {
+      "calls": 50,
+      "input_tokens": 44230,
+      "output_tokens": 10543,
+      "total_time": 1334.0197920799255,
+      "by_backend": {
+        "main": {
+          "calls": 50,
+          "total_time": 1334.0197920799255
+        }
+      }
+    },
+    "detectar_anomalia": {
+      "calls": 98,
+      "input_tokens": 16729,
+      "output_tokens": 485,
+      "total_time": 337.82643842697144,
+      "by_backend": {
+        "main": {
+          "calls": 98,
+          "total_time": 337.82643842697144
+        }
+      }
+    },
+    "decidir_busqueda": {
+      "calls": 25,
+      "input_tokens": 17845,
+      "output_tokens": 323,
+      "total_time": 264.5825049877167,
+      "by_backend": {
+        "main": {
+          "calls": 25,
+          "total_time": 264.5825049877167
+        }
+      }
+    },
+    "extraer_datos_usuario": {
+      "calls": 47,
+      "input_tokens": 8664,
+      "output_tokens": 1528,
+      "total_time": 308.0228054523468,
+      "by_backend": {
+        "main": {
+          "calls": 47,
+          "total_time": 308.0228054523468
+        }
+      }
+    },
+    "percepcion_usuario": {
+      "calls": 45,
+      "input_tokens": 5878,
+      "output_tokens": 1924,
+      "total_time": 299.6161961555481,
+      "by_backend": {
+        "main": {
+          "calls": 45,
+          "total_time": 299.6161961555481
+        }
+      }
+    },
+    "detectar_importancia": {
+      "calls": 33,
+      "input_tokens": 2603,
+      "output_tokens": 132,
+      "total_time": 111.86245679855347,
+      "by_backend": {
+        "main": {
+          "calls": 33,
+          "total_time": 111.86245679855347
+        }
+      }
+    },
+    "analizar_imagen": {
+      "calls": 25,
+      "input_tokens": 1415,
+      "output_tokens": 3043,
+      "total_time": 354.6374294757843,
+      "by_backend": {
+        "main": {
+          "calls": 25,
+          "total_time": 354.6374294757843
+        }
+      }
+    },
+    "inhibicion_latente": {
+      "calls": 23,
+      "input_tokens": 2826,
+      "output_tokens": 0,
+      "total_time": 82.04234623908997,
+      "by_backend": {
+        "main": {
+          "calls": 23,
+          "total_time": 82.04234623908997
+        }
+      }
+    },
+    "evaluar_saludo": {
+      "calls": 5,
+      "input_tokens": 522,
+      "output_tokens": 5,
+      "total_time": 23.813153505325317,
+      "by_backend": {
+        "main": {
+          "calls": 5,
+          "total_time": 23.813153505325317
+        }
+      }
+    },
+    "verificar_respuesta": {
+      "calls": 6,
+      "input_tokens": 1624,
+      "output_tokens": 466,
+      "total_time": 54.71857142448425,
+      "by_backend": {
+        "main": {
+          "calls": 6,
+          "total_time": 54.71857142448425
+        }
+      }
+    },
+    "reflexion_aprendizaje": {
+      "calls": 10,
+      "input_tokens": 4902,
+      "output_tokens": 1706,
+      "total_time": 231.38721132278442,
+      "by_backend": {
+        "main": {
+          "calls": 10,
+          "total_time": 231.38721132278442
+        }
+      }
+    },
+    "validar_nombre": {
+      "calls": 12,
+      "input_tokens": 7934,
+      "output_tokens": 48,
+      "total_time": 70.06073570251465,
+      "by_backend": {
+        "main": {
+          "calls": 12,
+          "total_time": 70.06073570251465
+        }
+      }
+    },
+    "busqueda_desde_pensamiento": {
+      "calls": 43,
+      "input_tokens": 16272,
+      "output_tokens": 621,
+      "total_time": 320.68181824684143,
+      "by_backend": {
+        "main": {
+          "calls": 33,
+          "total_time": 320.68181824684143
+        },
+        "cache": {
+          "calls": 10,
+          "total_time": 0
+        }
+      }
+    },
+    "consolidacion": {
+      "calls": 13,
+      "input_tokens": 6964,
+      "output_tokens": 1959,
+      "total_time": 196.10987901687622,
+      "by_backend": {
+        "main": {
+          "calls": 13,
+          "total_time": 196.10987901687622
+        }
+      }
+    },
+    "limpiar_curiosidades": {
+      "calls": 16,
+      "input_tokens": 8483,
+      "output_tokens": 309,
+      "total_time": 144.84165048599243,
+      "by_backend": {
+        "main": {
+          "calls": 16,
+          "total_time": 144.84165048599243
+        }
+      }
+    },
+    "evaluar_diversidad": {
+      "calls": 19,
+      "input_tokens": 6936,
+      "output_tokens": 14,
+      "total_time": 119.6384551525116,
+      "by_backend": {
+        "main": {
+          "calls": 19,
+          "total_time": 119.6384551525116
+        }
+      }
+    },
+    "monologo_unificado": {
+      "calls": 30,
+      "input_tokens": 16381,
+      "output_tokens": 4811,
+      "total_time": 682.3129336833954,
+      "by_backend": {
+        "main": {
+          "calls": 30,
+          "total_time": 682.3129336833954
+        }
+      }
+    },
+    "prediccion": {
+      "calls": 4,
+      "input_tokens": 424,
+      "output_tokens": 8,
+      "total_time": 12.68813443183899,
+      "by_backend": {
+        "main": {
+          "calls": 4,
+          "total_time": 12.68813443183899
+        }
+      }
+    }
+  }
+}
