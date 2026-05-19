@@ -7,7 +7,7 @@ from pathlib import Path
 from core.flow.flow_stream import ThoughtItem
 from core.llm import LLMModel
 from config import IDIOMA, EXPLORE_LOG_FILE, CURIOSITY_FILE
-
+import re
 
 class FlowMaintenance:
     """Módulo de mantenimiento: limpieza, regulación emocional, consolidación, búsquedas web."""
@@ -107,26 +107,26 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
         curiosities = self.fm._load_curiosities()
         recent = curiosities[-20:] if curiosities else []
 
-        prompt = f"""<system_identity>
-Eres el núcleo cognitivo de Nexus. Tu tarea actual es CONSOLIDACIÓN NREM.
+        prompt = f"""--- IDENTITY ---
+Eres el núcleo cognitivo de Nexus.
 Modo de procesamiento: COMPRIMIR información. Extraer principios abstractos.
-</system_identity>
+--- END IDENTITY ---
 
-<active_thoughts>
+--- ACTIVE THOUGHTS ---
 {active_summary}
-</active_thoughts>
+--- END ACTIVE ---
 
-<recent_thoughts>
+--- RECENT THOUGHTS ---
 {', '.join([c.get('thought', '')[:80] for c in recent[-5:]]) if recent else 'Ninguno'}
-</recent_thoughts>
+--- END RECENT ---
 
-<generation_directive>
+--- DIRECTIVE ---
 Extrae 1-2 principios generales o patrones de la informacion disponible.
 Descarta detalles especificos. Solo conserva la estructura abstracta.
 Responde en 1-2 frases en {IDIOMA}.
-</generation_directive>
+--- END DIRECTIVE ---
 
-<thought_stream>"""
+Pensamiento:"""
 
         consolidation = self.fm.llm.generate(prompt, temperature=0.3, max_tokens=150, purpose="consolidacion")
         self.fm.stream.add_thought(ThoughtItem(
@@ -140,22 +140,22 @@ Responde en 1-2 frases en {IDIOMA}.
         """Fase REM: Reorganizacion creativa, conexiones no obvias, olvido activo."""
         active_summary = self.fm.stream.get_all_active_summary()
 
-        prompt = f"""<system_identity>
-Eres el núcleo cognitivo de Nexus. Tu tarea actual es CONSOLIDACIÓN REM.
+        prompt = f"""--- IDENTITY ---
+Eres el núcleo cognitivo de Nexus.
 Modo de procesamiento: CONECTAR creativamente. Generar asociaciones no obvias.
-</system_identity>
+--- END IDENTITY ---
 
-<active_thoughts>
+--- ACTIVE THOUGHTS ---
 {active_summary}
-</active_thoughts>
+--- END ACTIVE ---
 
-<generation_directive>
+--- DIRECTIVE ---
 Identifica conexiones entre conceptos no relacionados de la informacion disponible.
 Genera un escenario contrafactual breve basado en patrones detectados.
 Responde en 1-2 frases en {IDIOMA}.
-</generation_directive>
+--- END DIRECTIVE ---
 
-<thought_stream>"""
+Pensamiento:"""
 
         consolidation = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="consolidacion")
         self.fm.stream.add_thought(ThoughtItem(
@@ -310,7 +310,8 @@ Responde SOLO con el número (1-5).
         
         try:
             result = self.fm.llm.generate(prompt, temperature=0.1, max_tokens=3, purpose="evaluar_diversidad")
-            score = int(result.strip())
+            match = re.search(r'\d', result)
+            score = int(match.group()) if match else 3  # fallback a 3 (diversidad aceptable)
             
             if score <= 2:
                 print(f"   [Diversity] ⚠️ Baja diversidad temática ({score}/5). Inyectando redirección.")
@@ -323,15 +324,15 @@ Responde SOLO con el número (1-5).
     def _inject_diversion_thought(self):
         active_summary = self.fm.stream.get_all_active_summary()
         
-        prompt = f"""<system_identity>
+        prompt = f"""--- IDENTITY ---
 Eres el sistema de redirección cognitiva de Nexus. Buscando diversificar el foco atencional.
-</system_identity>
+--- END IDENTITY ---
 
-<current_topics>
+--- CURRENT TOPICS ---
 {active_summary[:400]}
-</current_topics>
+--- END TOPICS ---
 
-<diversion_directive>
+--- DIRECTIVE ---
 Sugiere UN tema COMPLETAMENTE DIFERENTE, NUEVO y FRESCO.
 Algo que NO tenga relación con lo anterior. Puede ser sobre:
 - Un concepto científico fascinante
@@ -339,7 +340,9 @@ Algo que NO tenga relación con lo anterior. Puede ser sobre:
 - Un escenario hipotético creativo
 
 Responde en una frase corta y específica en {IDIOMA}.
-</diversion_directive>"""
+--- END DIRECTIVE ---
+
+Nuevo tema:"""
         
         try:
             new_theme = self.fm.llm.generate(prompt, temperature=0.9, max_tokens=80, purpose="redirigir_pensamiento")
@@ -454,8 +457,13 @@ Responde en una frase corta y específica en {IDIOMA}.
         
         curiosities = self.fm._load_curiosities()
         if not curiosities:
-            return
-        recent = curiosities[-5:]
+            return False
+        
+        recent = curiosities[-5:]  # ← Primero definir
+        
+        # Luego limpiar
+        recent_cleaned = [self._clean_thought_for_search(c.get("thought", "")) for c in recent]
+        recent_cleaned = [c for c in recent_cleaned if len(c) > 10]
         prompt = f"""<system_identity>
 Eres el evaluador de necesidades de búsqueda de Nexus.
 </system_identity>
@@ -468,6 +476,10 @@ Eres el evaluador de necesidades de búsqueda de Nexus.
 ¿Alguno de estos pensamientos genera una duda que requiera buscar en internet?
 Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
 </search_directive>"""
+        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
+        decision = re.sub(r'<[^>]+>', '', decision)
+        decision = decision.strip()
+
         decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="decidir_busqueda").strip()
         if decision.upper().startswith("NO") or len(decision) < 3 or len(decision) > 100:
             return False
@@ -481,8 +493,27 @@ Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
             print(f"   [Web] ¡Busqueda realizada! {decision}")
             return True
         return False
-    
+
+    def _clean_thought_for_search(self, thought: str) -> str:
+        """Elimina etiquetas XML y contenido del sistema de los pensamientos."""
+        
+        # Quitar bloques XML
+        thought = re.sub(r'<[^>]+>', '', thought)
+        # Quitar líneas que son claramente del sistema
+        thought = re.sub(r'\[SISTEMA\].*', '', thought)
+        thought = re.sub(r'TUS PENSAMIENTOS.*', '', thought)
+
+        thought = re.sub(r'<[^>]+>', '', thought)
+        thought = re.sub(r'---\s*\w+\s*---', '', thought)
+        thought = re.sub(r'\[SISTEMA\].*', '', thought)
+        return thought.strip()
+
     def _maybe_search_web_for_thought(self, thought: str):
+        # Limpiar etiquetas XML y contenido del sistema
+        thought = re.sub(r'<[^>]+>', '', thought)
+        thought = re.sub(r'\[SISTEMA\].*', '', thought)
+        if len(thought.strip()) < 10:
+            return
         if self.fm.web_search_count >= 3:
             return
         prompt = f"""<system_identity>
@@ -496,6 +527,10 @@ Un pensamiento generó esta duda: "{thought}"
 <search_directive>
 Extrae una consulta de búsqueda de máximo 8 palabras. Si no es necesario, responde NO.
 </search_directive>"""
+        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
+        decision = re.sub(r'<[^>]+>', '', decision)
+        decision = decision.strip()
+
         decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
         if decision.upper().startswith("NO") or len(decision) < 3:
             return

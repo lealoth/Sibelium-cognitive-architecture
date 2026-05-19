@@ -158,7 +158,7 @@ class EpisodicMemory:
 
             # Zona gris y roja: evaluación con LLM local
             prompt = f"""<system_identity>
-Eres el sistema de detección de contradicciones de Sibelium.
+Eres el sistema de detección de contradicciones.
 </system_identity>
 
 <factual_context>

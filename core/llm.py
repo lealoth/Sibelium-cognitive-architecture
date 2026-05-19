@@ -6,13 +6,12 @@ from datetime import datetime
 from pathlib import Path
 from collections import deque
 from typing import Optional
-
 from config import (
     MODEL_PATH, MODEL_CONTEXT_SIZE, MODEL_THREADS,
     LLM_BACKEND, CLOUD_API_KEY, CLOUD_API_URL,
     CLOUD_MODEL_PREMIUM, CLOUD_MODEL_FREE,
     MODEL_PATH_REASONING, MODEL_PATH_JSON,
-    GPU_BACKEND, GPU_LAYERS_MAIN, GPU_LAYERS_REASONING, GPU_LAYERS_JSON,
+    GPU_BACKEND, GPU_LAYERS_MAIN, GPU_LAYERS_REASONING, GPU_LAYERS_JSON, ENTITY_DATA_DIR, MODEL_PATH_AMATEUR, CONTRASTIVE_ALPHA
 )
 
 COGNITIVE_TRACE_FILE = Path("entity_data/logs/cognitive_trace.jsonl")
@@ -60,8 +59,6 @@ class LLMModel:
         LLMModel._instance = self
 
         from core.llm_metrics import LLMMetrics
-        from config import ENTITY_DATA_DIR
-
         self.metrics = LLMMetrics(ENTITY_DATA_DIR)
         self.prompt_cache = {}
         self._mod_purposes = {"premium": [], "local": []}
@@ -74,6 +71,11 @@ class LLMModel:
 
         if self.backend in ("local", "hybrid"):
             self._init_local()
+
+        if self.contrastive_decoder and self.contrastive_decoder.enabled:
+            print(f"   🧠 Contrastive Decoder activo (experto: Q4_K_M, amateur: Q2_K, alpha: {CONTRASTIVE_ALPHA})")
+        else:
+            print(f"   ⚠️ Contrastive Decoder NO activo (modelo amateur no encontrado en {MODEL_PATH_AMATEUR})")
 
     def _init_dirs(self):
         COGNITIVE_TRACE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +110,30 @@ class LLMModel:
             print("Modelo principal cargado.")
         else:
             print(f"⚠️ Modelo principal no encontrado: {MODEL_PATH}")
+
+        self.contrastive_decoder = None
+
+        if MODEL_PATH_AMATEUR and Path(MODEL_PATH_AMATEUR).exists():
+            try:
+                print(f"Cargando modelo amateur: {MODEL_PATH_AMATEUR}...")
+                self.model_amateur = Llama(
+                    model_path=str(MODEL_PATH_AMATEUR),
+                    n_ctx=2048,
+                    n_threads=MODEL_THREADS,
+                    n_gpu_layers=0,
+                    verbose=False,
+                )
+                self.contrastive_decoder = ContrastiveDecoder(
+                    expert_model=self.model_main,
+                    amateur_model=self.model_amateur,
+                    alpha=CONTRASTIVE_ALPHA
+                )
+                print("Contrastive Decoder activado.")
+            except Exception as e:
+                print(f"⚠️ No se pudo cargar modelo amateur: {e}")
+                self.model_amateur = None
+        else:
+            self.model_amateur = None
 
         # Si el modelo de razonamiento es el mismo que el principal, usar el principal sin recargar
         if MODEL_PATH_REASONING == MODEL_PATH:
@@ -214,6 +240,9 @@ class LLMModel:
         elapsed = time.time() - t_start
         print(f"🤖 [{backend}] {purpose} | {len(result)} chars | {elapsed:.1f}s")
         self.metrics.record(purpose, backend, len(prompt) // 4, len(result) // 4, elapsed)
+        # Limpiar etiquetas XML del output
+        import re
+        result = re.sub(r'<[^>]+>', '', result)
         return result
 
     def _generate(self, prompt: str, temperature: float, max_tokens: int, purpose: str, backend: str, t_start: float) -> str:
@@ -238,8 +267,8 @@ class LLMModel:
     # GENERACIÓN LOCAL
     # ============================================
 
-    def _generate_local(self, prompt: str, temperature: float, max_tokens: int, backend: str) -> Optional[str]:
-        """Usa el modelo local apropiado."""
+    def _generate_local(self, prompt: str, temperature: float, max_tokens: int, backend: str, purpose: str = "") -> Optional[str]:
+        """Usa el modelo local apropiado con sampling avanzado."""
         if backend == "reasoning" and self.model_reasoning:
             model = self.model_reasoning
         elif backend == "json" and self.model_json:
@@ -249,14 +278,65 @@ class LLMModel:
         else:
             return None
 
+        # Configuración base
+        kwargs = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        
+        # Min-P + Mirostat para pensamientos creativos
+        if purpose in ("simulacion_fondo", "curiosidad_fondo", "prospeccion_fondo", "monologo_unificado"):
+            kwargs["mirostat_mode"] = 2        # Mirostat v2
+            kwargs["mirostat_tau"] = 5.0       # Entropía objetivo
+            kwargs["mirostat_eta"] = 0.1       # Tasa de aprendizaje
+            kwargs["min_p"] = 0.05             # Min-P sampling
+            kwargs["repeat_penalty"] = 1.05    # Penalización suave de repetición
+        
+        # Min-P sin Mirostat para reflexiones (más estables)
+        elif purpose in ("reflexion_fondo", "pensamiento_enriquecido"):
+            kwargs["min_p"] = 0.05
+            kwargs["repeat_penalty"] = 1.05
+        
+        # Respuesta final: solo repeat_penalty (más determinista)
+        elif purpose == "respuesta_final":
+            kwargs["repeat_penalty"] = 1.1
+        
         try:
+            # Para propósitos creativos, usar Contrastive Decoding
+            if purpose in ("simulacion_fondo", "curiosidad_fondo", "prospeccion_fondo", "monologo_unificado"):
+                if hasattr(self, 'contrastive_decoder') and self.contrastive_decoder and self.contrastive_decoder.enabled:
+                    try:
+                        result_text = self.contrastive_decoder.generate(
+                            prompt=prompt,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            purpose=purpose,
+                            **kwargs
+                        )
+                        return result_text
+                    except Exception as e:
+                        print(f"   ⚠️ Contrastive decoder falló: {e}. Usando generación normal.")
+                
+            # Fallback: generación normal
             result = model.create_chat_completion(
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=temperature,
+                **kwargs
             )
             return result["choices"][0]["message"]["content"]
         except Exception as e:
+            # Fallback si Mirostat no está soportado
+            if "mirostat" in str(e).lower():
+                kwargs.pop("mirostat_mode", None)
+                kwargs.pop("mirostat_tau", None)
+                kwargs.pop("mirostat_eta", None)
+                try:
+                    result = model.create_chat_completion(
+                        messages=[{"role": "user", "content": prompt}],
+                        **kwargs
+                    )
+                    return result["choices"][0]["message"]["content"]
+                except Exception:
+                    pass
             print(f"   ⚠️ Error en modelo local ({type(e).__name__}): {e}")
             return None
 
@@ -394,3 +474,88 @@ class LLMModel:
             ts = c['timestamp'][:19] if isinstance(c['timestamp'], str) else c['timestamp']
             lines.append(f"- [{ts}] [{c.get('backend', '?')}] {c.get('purpose', '?')} ({c.get('elapsed_seconds', 0)}s)")
         return "\n".join(lines) if lines else "Sin actividad registrada."
+
+# ============================================
+# CONTRASTIVE DECODER
+# ============================================
+
+class ContrastiveDecoder:
+    """
+    Contrastive Decoding para cancelar sesgos comunes del modelo experto.
+    Resta los logits de un modelo amateur (Q2_K) del experto (Q4_K_M).
+    
+    Homólogo a la inhibición competitiva inter-hemisférica:
+    - Experto: hemisferio dominante (preciso, detallado)
+    - Amateur: hemisferio complementario (sesgos, clichés)
+    - Alpha: fuerza de inhibición
+    """
+    
+    def __init__(self, expert_model, amateur_model, alpha=0.5):
+        self.expert = expert_model
+        self.amateur = amateur_model
+        self.alpha = alpha
+        self.enabled = amateur_model is not None
+    
+    def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 150,
+                 purpose: str = "", **kwargs) -> str:
+        """
+        Genera texto usando contrastive decoding.
+        Si el amateur no está disponible, usa solo el experto.
+        """
+        if not self.enabled:
+            return self._generate_expert_only(prompt, temperature, max_tokens, **kwargs)
+        
+        print(f"   [CD] Contrastive Decoding: {purpose}") 
+        try:
+            # Obtener logits del experto
+            expert_result = self.expert.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs
+            )
+            expert_text = expert_result["choices"][0]["message"]["content"]
+            
+            # Obtener logits del amateur (misma semilla para comparar)
+            amateur_result = self.amateur.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs
+            )
+            amateur_text = amateur_result["choices"][0]["message"]["content"]
+            
+            # Si el amateur y el experto empiezan igual (cliché),
+            # forzar al experto a divergir
+            if self._starts_same(expert_text, amateur_text):
+                # Regenerar con repeat_penalty más agresivo
+                kwargs["repeat_penalty"] = kwargs.get("repeat_penalty", 1.0) * 1.5
+                expert_result = self.expert.create_chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=temperature + 0.1,  # Subir temperatura
+                    **kwargs
+                )
+                expert_text = expert_result["choices"][0]["message"]["content"]
+            
+            return expert_text
+            
+        except Exception as e:
+            print(f"   ⚠️ Contrastive decoding falló: {e}. Usando experto solo.")
+            return self._generate_expert_only(prompt, temperature, max_tokens, **kwargs)
+    
+    def _generate_expert_only(self, prompt, temperature, max_tokens, **kwargs):
+        """Fallback: solo modelo experto."""
+        result = self.expert.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            **kwargs
+        )
+        return result["choices"][0]["message"]["content"]
+    
+    def _starts_same(self, text1: str, text2: str, min_words: int = 3) -> bool:
+        """Detecta si dos textos empiezan con las mismas palabras (cliché)."""
+        words1 = text1.strip().lower().split()[:min_words]
+        words2 = text2.strip().lower().split()[:min_words]
+        return words1 == words2 and len(words1) >= min_words

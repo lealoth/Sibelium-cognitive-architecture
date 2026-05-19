@@ -1,9 +1,14 @@
+
+import setup_environment
+
 # main.py
 import uvicorn
 import webbrowser
 import threading
 from api.server import app
 from config import HOST, PORT
+import os
+from pathlib import Path
 
 def open_browser():
     webbrowser.open(f"http://{HOST}:{PORT}")

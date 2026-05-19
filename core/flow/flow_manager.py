@@ -11,6 +11,7 @@ from config import EXPLORE_DIR, EXPLORE_LOG_FILE, CURIOSITY_FILE, STATE_SNAPSHOT
 from core.flow.flow_stream import FlowStream, ThoughtItem
 from core.flow.fast_processors import FastCognitiveProcessors
 from core.flow.reactive_thoughts import ReactiveThoughts
+from core.flow.salience_network import SalienceNetwork
 from core.flow.thought_satiety import ThoughtSatiety
 from core.flow.pattern_extractor import PatternExtractor
 from core.flow.flow_thoughts import FlowThoughts
@@ -40,7 +41,11 @@ class FlowManager:
         # AssociativeMemory para recuperación por vecindad.
         from core.memory.episodic_memory import EpisodicMemory
         from core.memory.associative_memory import AssociativeMemory, patch_episodic_memory_get_relevant
-
+        from core.flow.trn_gate import TRNGate, Priority
+        from core.flow.salience_network import SalienceNetwork
+        self.salience = SalienceNetwork.get_instance()
+        self.trn_gate = TRNGate.get_instance()
+        self.trn_gate.set_executor(self._execute_llm)
         base_episodic = EpisodicMemory()
         patched_episodic = patch_episodic_memory_get_relevant(base_episodic)
         self.associative_memory = AssociativeMemory(patched_episodic)
@@ -109,6 +114,10 @@ class FlowManager:
         PENDING_MESSAGES_FILE.parent.mkdir(parents=True, exist_ok=True)
         BACKGROUND_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
     
+    def _execute_llm(self, prompt, temperature, max_tokens, purpose):
+        """Wrapper para que el TRN-Gate ejecute llamadas al LLM."""
+        return self.llm.generate(prompt, temperature=temperature, max_tokens=max_tokens, purpose=purpose)
+
     # ============================================
     # CICLO DE VIDA
     # ============================================
@@ -148,6 +157,8 @@ class FlowManager:
                 print(f"[!] Traceback: {traceback.format_exc()}")
     
     def _fast_tick(self):
+        if not self.salience.is_dmn_active:
+            return  # DMN inhibida por Red de Saliencia
         for hook in self._mod_hooks.get("on_fast_tick", []):
             try:
                 hook(self)
@@ -348,6 +359,8 @@ Responde en una frase corta en {IDIOMA}.
             self.stream._update_active()
     
     def _slow_tick(self):
+        if not self.salience.is_dmn_active:
+            return  # DMN inhibida por Red de Saliencia
         for hook in self._mod_hooks.get("on_slow_tick", []):
             try:
                 hook(self)
@@ -411,6 +424,11 @@ Responde en una frase corta en {IDIOMA}.
     # ============================================
     
     def handle_user_message(self, message: str) -> dict:
+        # Activar Red de Saliencia: inhibir DMN
+        self.salience.on_user_message()
+
+        self.trn_gate.on_user_message()
+
         # Atenuar la DMN en lugar de pausarla estáticamente (factor de inhibición GABA)
         for t in self.stream.thoughts:
             t._dmn_attenuation = 0.3
@@ -446,6 +464,8 @@ Responde en una frase corta en {IDIOMA}.
         self._restore_attention()
         self.last_thought_time = datetime.now()
 
+        self.trn_gate.on_response_sent()
+        self.salience.on_response_sent()  # Reactivar DMN
         return result
     
     def _restore_attention(self):
@@ -467,7 +487,7 @@ Responde en una frase corta en {IDIOMA}.
         if len(response_text) < 80:
             return False
         prompt = f"""<system_identity>
-Eres el detector de anomalías de personalidad de Sibelium.
+Eres el detector de anomalías de personalidad.
 </system_identity>
 
 <response_to_evaluate>
@@ -656,8 +676,16 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
         return []
     
     def _store_curiosity(self, thought):
+        # Limpiar bloques de formato antes de almacenar
+        import re
+        cleaned = re.sub(r'---\s*\w+\s*---', '', thought)
+        cleaned = re.sub(r'<[^>]+>', '', cleaned)
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return
+        
         curiosities = self._load_curiosities()
-        curiosities.append({"timestamp": datetime.now().isoformat(), "thought": thought})
+        curiosities.append({"timestamp": datetime.now().isoformat(), "thought": cleaned})
         if len(curiosities) > 30:
             curiosities = curiosities[-30:]
         CURIOSITY_FILE.write_text(json.dumps(curiosities, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -713,7 +741,7 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
     def _is_explicit_correction(self, message: str) -> Optional[dict]:
         """Usa LLM para detectar si el mensaje corrige una creencia anterior."""
         prompt = f"""<system_identity>
-Eres el detector de correcciones del usuario de Sibelium.
+Eres el detector de correcciones del usuario.
 </system_identity>
 
 <user_message>

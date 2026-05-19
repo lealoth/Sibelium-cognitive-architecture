@@ -5,6 +5,7 @@ __pycache__/
 
 # Modelos LLM
 models/
+models_cache/
 
 # Entidades (datos generados)
 entitys/

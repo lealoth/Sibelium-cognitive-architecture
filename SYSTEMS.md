@@ -218,6 +218,18 @@ This document describes each of the 32 cognitive systems implemented in Sibelium
 **What it does:** Formats proposed code or architecture changes as structured reports with sections: theoretical foundation, proposed implementation, and self-criticism log (documenting past attempts and their outcomes).  
 **Functional outcome:** Produces human-reviewable deliverables with explicit reasoning chains and failure documentation. External reviewers can trace the decision process.
 
+### 33. Associative Memory (Neighborhood Retrieval)
+**File:** `core/memory/associative_memory.py`  
+**Neuroscience basis:** Pattern completion in hippocampal CA3 + sharp-wave ripples  
+**What it does:** Extends episodic memory retrieval with associative navigation. For each primary memory retrieved, searches for its 3-5 nearest neighbors in embedding space using sequential reactivation (Approach A). Applies a sigmoid activation threshold based on the primary memory's activation strength and explicit relevance weighting in the injected context.  
+**Functional outcome:** The entity retrieves not just isolated facts, but the full associative context surrounding each memory. Responses include lateral connections between related topics.
+
+### 34. Temporal Focus Modulator
+**File:** `core/memory/episodic_memory.py`  
+**Neuroscience basis:** DLPFC executive control over hippocampus + prefrontal competitive inhibition  
+**What it does:** Determines the temporal orientation of the user's query (remote, recent, neutral) using multilingual semantic anchors and Softmax contrast amplification with a dynamic threshold based on Shannon entropy. Modulates the trimetric retrieval score: remote mode applies logarithmic scaling to favor older memories; recent mode applies exponential decay; neutral mode nullifies the temporal factor.  
+**Functional outcome:** The entity distinguishes between "the first time we talked about X" and "the last time we talked about X," adjusting memory retrieval to the temporal context of the question.
+
 ---
 
 ## Summary Table
@@ -256,3 +268,5 @@ This document describes each of the 32 cognitive systems implemented in Sibelium
 | 30 | Prospection | `flow_thoughts.py` | Episodic future thinking |
 | 31 | Entropy Explorer | `flow_manager.py` | Zone of Proximal Development |
 | 32 | Evolution Reports | `self_engineer.py` | Metacognitive evaluation |
+| 33 | Associative Memory | `associative_memory.py` | Pattern completion (CA3) |
+| 34 | Temporal Focus | `episodic_memory.py` | DLPFC + Competitive inhibition |

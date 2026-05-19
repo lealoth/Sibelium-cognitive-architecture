@@ -15,7 +15,42 @@ GAMMA_TASK = {
     "simulacion": 0.5,
     "prospeccion": 0.5,
     "consolidacion": 0.0,
+    "respuesta_final": 0.2,
 }
+# Factores de sampling avanzado por propósito
+SAMPLING_PROFILES = {
+    "simulacion": {
+        "mirostat": True,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "description": "Creativo con control de entropía"
+    },
+    "curiosidad": {
+        "mirostat": True,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "description": "Exploratorio con variabilidad controlada"
+    },
+    "prospeccion": {
+        "mirostat": True,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "description": "Proyección futura con diversidad"
+    },
+    "reflexion": {
+        "mirostat": False,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "description": "Estable pero con filtro de ruido"
+    },
+    "respuesta_final": {
+        "mirostat": False,
+        "min_p": 0.0,
+        "repeat_penalty": 1.1,
+        "description": "Determinista con anti-repetición"
+    },
+}
+
 
 # Rango de seguridad
 T_MIN = 0.2
