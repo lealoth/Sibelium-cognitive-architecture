@@ -44,32 +44,45 @@ Sibelium Cognitive Architecture
 - │ ├── flow/ # Stream of consciousness
 - │ │ ├── flow_manager.py # Main orchestrator (dual-tick cycle)
 - │ │ ├── flow_stream.py # Thought items with priority decay
+- │ │ ├── flow_thoughts.py # Spontaneous thought generation (reflection, curiosity, simulation, prospection)
+- │ │ ├── flow_interaction.py # User interaction, response generation, executive buffer
+- │ │ ├── flow_maintenance.py # Sleep cycles, regulation, cleanup, web search
 - │ │ ├── fast_processors.py # Algorithmic cognition (no LLM)
-- │ │ ├── reactive_thoughts.py # Micro-reactions to changes
-- │ │ ├── thought_satiety.py # Prevents thought over-generation
-- │ │ └── pattern_extractor.py # Pattern detection & generalization
+- │ │ ├── reactive_thoughts.py # Micro-reactions to internal state changes
+- │ │ ├── thought_satiety.py # Dynamic cooldowns to prevent thought over-generation
+- │ │ ├── pattern_extractor.py # Pattern detection, Hebbian pruning, event-driven triggers
+- │ │ ├── trn_gate.py # Unified monologue (pragmatics + keywords + pattern + reflection in 1 call)
+- │ │ ├── temperature_optimizer.py # Dynamic temperature formula (Sibelium equation per purpose & quantization)
+- │ │ └── salience_network.py # Salience detection and attention modulation
 - │ ├── cognitive_loop.py # Main orchestrator & post-processing
-- │ ├── llm.py # Multi-model management (local + cloud)
+- │ ├── llm.py # Multi-model management (local + cloud), thalamic routing, KV cache
+- │ ├── llm_contrastive.py # Contrastive evaluation for response quality
+- │ ├── llm_metrics.py # LLM call metrics, performance tracking
 - │ ├── memory/
-- │ │ ├── episodic_memory.py # ChromaDB for long-term memory
-- │ │ ├── self_memory.py # Entity's self-state & evolution
-- │ │ ├── user_memory.py # User profile & perception
-- │ │ └── scaffolding.py # Cognitive scaffolding for learning
+- │ │ ├── episodic_memory.py # ChromaDB long-term memory, trimetric scoring, temporal focus, contradiction detection
+- │ │ ├── associative_memory.py # Neighborhood retrieval, pattern completion, sigmoid activation threshold
+- │ │ ├── self_memory.py # Entity's self-state, narrative self, minimal self, evolution tracking
+- │ │ ├── user_memory.py # User profile, perception history, relationship tracking
+- │ │ ├── active_forgetting.py # Synaptic pruning with dynamic importance-based threshold
+- │ │ └── scaffolding.py # Cognitive scaffolding for learning (Vygotsky ZPD)
 - │ ├── models/
 - │ │ └── cognitive_state.py # State data model
 - │ └── perception/
-- │ ├── file_analyzer.py # Image (BLIP), audio (Whisper), code
-- │ ├── time_perception.py # Temporal context
-- │ └── user_analysis.py # Intent & emotion extraction
+- │ ├── file_analyzer.py # Image (CLIP, BLIP), audio (Whisper), code analysis
+- │ ├── time_perception.py # Temporal context, circadian markers
+- │ └── user_analysis.py # Empathic resonance, intent & emotion extraction (no keywords)
 - ├── api/
-- │ └── server.py # FastAPI endpoints
+- │ └── server.py # FastAPI endpoints, SSE streaming, session management
 - ├── frontend/ # Vanilla JS web interface
 - ├── entity_data/
-- │ ├── identity/persona.json # Base personality
-- │ ├── memory/ # Persistent cognitive state
-- │ │ └── users/ # User profile data
-- │ └── nexus_world/ # Files for exploration
-- └── config.py # All configuration
+- │ ├── identity/persona.json # Base personality, traits (OCEAN), thought style, epistemic bounds
+- │ ├── memory/ # Persistent cognitive state, evolution snapshots
+- │ │ └── users/ # Per-user profiles, perception history, interaction counts
+- │ └── nexus_world/ # Files for autonomous exploration
+- ├── models/ # Local GGUF model files
+- ├── config.py # All configuration (model paths, API keys, intervals, thresholds)
+- ├── main.py # Entry point
+- └── start.bat # Windows launcher with dependency validation
 
 ---
 
