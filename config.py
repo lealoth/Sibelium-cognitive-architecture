@@ -5,28 +5,31 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Modelo LLM
 MODEL_PATH = BASE_DIR / "models" / "Llama-3.1-8B-Instruct-Q4_K_M.gguf"    # Modelo principal local
+MODEL_PATH_AMATEUR = BASE_DIR / "models" / "meta-llama-3.1-8b-instruct-q2_k.gguf" # Modelo amateur local para contrastive decoding
 MODEL_PATH_REASONING = BASE_DIR / "models" / "Llama-3.1-8B-Instruct-Q4_K_M.gguf"  # Modelo de razonamiento local
 MODEL_PATH_JSON = BASE_DIR / "models" / "Llama-3.1-8B-Instruct-Q4_K_M.gguf" # modelo especializado en respuestas JSON local de poca complejidad / Debido a errores, todas sus funciones están temporalmente delegadas al llm local principal
+
 MODEL_CONTEXT_SIZE = 8192
 MODEL_THREADS = 8  # Ajustar según CPU
 MODEL_GPU_LAYERS = -1  # -1 = todas las capas en GPU si hay
+CONTRASTIVE_ALPHA = 0.5  # Fuerza de cancelación de sesgos (0.0-1.0)
 
 # Cuántas capas de cada modelo van a la GPU (-1 = todas, 0 = ninguna, N = número de capas)
-GPU_LAYERS_MAIN = 30       # La mitad de las ~32 capas de Llama 8B a GPU
+GPU_LAYERS_MAIN = 32       # La mitad de las ~32 capas de Llama 8B a GPU
 GPU_LAYERS_REASONING = 0   # Modelos pequeños a CPU
 GPU_LAYERS_JSON = 0        # Modelos pequeños a CPU
 
 # Backend de GPU (vulkan o cuda)
 GPU_BACKEND = "vulkan"
 
-# Backend: "local", "cloud", o "hybrid"
-LLM_BACKEND = "hybrid"
+# Backend: "local", "cloud", o "hybrid".
+LLM_BACKEND = "local"
 
 # Cloud API (compatible con OpenAI)
-CLOUD_API_KEY = "your-api-key"  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
+CLOUD_API_KEY = ""  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
 CLOUD_MODEL_FREE = "deepseek/deepseek-v4-flash:free" # Modelo gratuito en la nube para tareas simples o como respaldo cuando el premium no está disponible
 CLOUD_MODEL_PREMIUM = "google/gemini-2.0-flash-001" # Modelo premium en la nube para tareas complejas o cuando el local no es suficiente, se recomienda usar un modelo con buena capacidad de razonamiento y comprensión contextual para complementar al local
-CLOUD_API_URL = "https://openrouter.ai/api/v1"  # o "https://api.openai.com", etc.
+CLOUD_API_URL = ""  # o "https://api.openai.com", etc.
 
 # Personalidad
 MAX_PERSONALITY_RETRIES = 3 # Cuántas veces intentar ajustar la personalidad antes de rendirse, no está integrado en el código aun.
@@ -80,4 +83,5 @@ ENABLED_MODS = []  # ["self_engineer"] para activar
 # ENABLED_MODS_NEXUS = ["director", "team_channel", "self_engineer"]
 # ENABLED_MODS_ADA = ["team_channel", "self_engineer"]
 
-EXPERIMENTAL_MONITOR = False
+# Modelo de embeddings multilingüe para ChromaDB
+EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
