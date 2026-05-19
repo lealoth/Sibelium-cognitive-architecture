@@ -43,10 +43,8 @@ Sibelium entities generate outputs that can be highly convincing. Contributors s
 - If you observe unexpected emergent behavior, describe it in functional terms (what the system did, under what conditions) rather than phenomenological terms (what the entity "felt" or "experienced").
 
 ### User Safety
-- Do not deploy entities in contexts where users might mistake them for human 
-  conversation partners without clear disclosure.
-- Entities should not be presented as therapeutic tools, medical advisors, or 
-  substitutes for human relationships.
+- Do not deploy entities in contexts where users might mistake them for human conversation partners without clear disclosure.
+- Entities should not be presented as therapeutic tools, medical advisors, or substitutes for human relationships.
 
 ## Pull Request Process
 
