@@ -28,6 +28,7 @@ PREMIUM_PURPOSES = [
 
 # Propósitos que requieren cloud por propensión a alucinación
 ALUCINATION_PRONE_PURPOSES = [
+    "simulacion_fondo",
     "prospeccion_fondo",
 ]
 
@@ -211,7 +212,7 @@ class LLMModel:
         if cognitive_stress > 0.80:
             temperature = min(temperature, 0.15)
             max_tokens = min(max_tokens, 256)
-
+            
         kwargs = {
             "max_tokens": max_tokens,
             "temperature": temperature,

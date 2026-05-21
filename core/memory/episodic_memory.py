@@ -41,16 +41,19 @@ class EpisodicMemory:
             document_id = str(uuid.uuid4())
             base_metadata = {
                 "source": "user_interaction",
-                "user_message": user_message,
-                "assistant_response": assistant_response,
-                "user_id": user_id,
+                "user_message": user_message or "",
+                "assistant_response": assistant_response or "",
+                "user_id": user_id or "default",
                 "timestamp": datetime.now().isoformat(),
             }
             if metadata:
                 base_metadata.update(metadata)
+            
+            clean_meta = self._sanitize_meta(base_metadata)  # ← AÑADIR
+            
             self.collection.add(
                 documents=[content],
-                metadatas=[self._sanitize_meta(base_metadata)],
+                metadatas=[clean_meta],
                 ids=[document_id],
             )
 
