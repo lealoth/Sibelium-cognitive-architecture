@@ -78,6 +78,87 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
     # CONSOLIDACIÓN
     # ============================================
     
+    def _run_immune_check(self):
+        now = datetime.now()
+        if self.fm._last_immune_check and (now - self.fm._last_immune_check).total_seconds() < 300:
+            return
+        self.fm._last_immune_check = now
+
+        # Determinar estado (idle vs interacción)
+        is_idle = (
+            self.fm.last_message_time is None
+            or (datetime.now() - self.fm.last_message_time).total_seconds() > 120
+        )
+        state = "IDLE" if is_idle else "INTERACCION"
+
+        # Calcular umbral adaptativo por rol y expresividad
+        persona = self.fm.cognitive_loop.load_persona()
+        threshold = self._calculate_immune_threshold(persona, state)
+
+        recent_responses = [
+            entry.get("text", "") for entry in self.fm.cognitive_loop.last_history[-5:]
+            if entry.get("role") == "assistant"
+        ]
+        if len(recent_responses) < 2:
+            return
+
+        base_personality = self._get_personality_vector()
+        if base_personality is None:
+            return
+
+        import numpy as np
+        response_text = " ".join(recent_responses)[:500]
+        response_emb = self.fm.stream._get_embedding(response_text)
+        if response_emb is None:
+            return
+
+        response_arr = np.array(response_emb)
+        response_norm = response_arr / max(np.linalg.norm(response_arr), 1e-8)
+        base_arr = np.array(base_personality)
+        base_norm = base_arr / max(np.linalg.norm(base_arr), 1e-8)
+        distance = 1.0 - float(np.dot(response_norm, base_norm))
+
+        if distance > threshold:
+            print(f"   [Inmune] ⚠️ Deriva detectada (dist: {distance:.2f}, umbral: {threshold:.2f}). Restaurando...")
+            self._inject_immune_response(distance)
+
+    def _calculate_immune_threshold(self, persona: dict, state: str = "INTERACCION") -> float:
+        """
+        Umbral Inmune Adaptativo por Plasticidad y Rol.
+        
+        Fórmula: τ = τ_base + Δ_max × (1 - ε) × γ
+        
+        - ε (expressiveness_base): A menor expresividad, más tolerancia (dominio técnico)
+        - γ (gamma): Factor de privilegio inmune según role_type
+        - state: "IDLE" o "INTERACCION" (diferentes bases)
+        """
+        # 1. Bases según estado
+        if state == "IDLE":
+            base_threshold = 0.70
+            max_delta = 0.20
+        else:
+            base_threshold = 0.45
+            max_delta = 0.25
+        
+        # 2. Parámetros de la entidad
+        traits = persona.get("traits", {})
+        expressiveness = traits.get("expressiveness_base", 0.5)
+        role_type = persona.get("role_type", "conversational")
+        
+        # 3. Matriz de Privilegio Inmune (gamma)
+        role_privilege = {
+            "conversational": 0.1,
+            "experimental": 0.5,
+            "data_analyst": 0.8,
+            "self_engineer": 1.0,
+        }
+        gamma = role_privilege.get(role_type, 0.3)
+        
+        # 4. Umbral adaptativo
+        threshold = base_threshold + (max_delta * (1.0 - expressiveness) * gamma)
+        
+        return round(threshold, 3)
+
     def _consolidate_memories(self):
         if self.fm.last_message_time:
             elapsed = (datetime.now() - self.fm.last_message_time).total_seconds()
@@ -102,74 +183,133 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
 
 
     def _consolidate_nrem(self):
-        """Fase NREM: Extrae principios abstractos, descarta detalles."""
+        """Fase NREM con clustering geométrico previo al LLM."""
         active_summary = self.fm.stream.get_all_active_summary()
         curiosities = self.fm._load_curiosities()
         recent = curiosities[-20:] if curiosities else []
 
-        prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo.
-Modo de procesamiento: COMPRIMIR información. Extraer principios abstractos.
---- END IDENTITY ---
+        # Fase geométrica: agrupar fragmentos indexados por densidad vectorial
+        clustered_knowledge = self._cluster_indexed_knowledge()
+        
+        prompt = f"""--- NREM CONSOLIDATION ---
+    [ACTIVE THOUGHTS]: {active_summary}
+    [RECENT REFLECTIONS]: {', '.join([c.get('thought', '')[:80] for c in recent[-5:]]) if recent else 'None'}
+    [CLUSTERED KNOWLEDGE (grouped by semantic density)]:
+    {clustered_knowledge[:1500] if clustered_knowledge else 'No clusters formed'}
 
---- ACTIVE THOUGHTS ---
-{active_summary}
---- END ACTIVE ---
+    Extract 1-2 abstract principles from each cluster.
+    Respond in {IDIOMA}."""
+        
+        consolidation = self.fm.llm.generate(prompt, temperature=0.3, max_tokens=200, purpose="consolidacion")
+        if consolidation:
+            self.fm.stream.add_thought(ThoughtItem(
+                content=f"[NREM] {consolidation}",
+                thought_type="consolidation", priority=0.8, source="internal"
+            ))
 
---- RECENT THOUGHTS ---
-{', '.join([c.get('thought', '')[:80] for c in recent[-5:]]) if recent else 'Ninguno'}
---- END RECENT ---
 
---- DIRECTIVE ---
-Extrae 1-2 principios generales o patrones de la informacion disponible.
-Descarta detalles especificos. Solo conserva la estructura abstracta.
-Responde en 1-2 frases en {IDIOMA}.
---- END DIRECTIVE ---
-
-Pensamiento:"""
-
-        consolidation = self.fm.llm.generate(prompt, temperature=0.3, max_tokens=150, purpose="consolidacion")
-        self.fm.stream.add_thought(ThoughtItem(
-            content=f"[NREM] {consolidation}",
-            thought_type="consolidation", priority=0.8, source="internal"
-        ))
-        self.fm._store_curiosity(f"[NREM] {consolidation}")
-
+    def _cluster_indexed_knowledge(self) -> str:
+        """Agrupa fragmentos de semantic_library por densidad vectorial."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            # Obtener fragmentos recientes
+            results = episodic.query_semantic(
+                self.fm.stream.get_all_active_summary()[:300],
+                n_results=15
+            )
+            if len(results) < 3:
+                return ""
+            
+            # Obtener embeddings de los fragmentos
+            embeddings = []
+            texts = []
+            for r in results:
+                emb = self.fm.stream._get_embedding(r["content"][:500])
+                if emb:
+                    embeddings.append(emb)
+                    texts.append(r["content"][:300])
+            
+            if len(embeddings) < 3:
+                return ""
+            
+            import numpy as np
+            emb_array = np.array(embeddings)
+            
+            # Clustering simple por distancia coseno (fallback sin UMAP/HDBSCAN)
+            from sklearn.cluster import DBSCAN
+            clustering = DBSCAN(eps=0.3, min_samples=2, metric='cosine').fit(emb_array)
+            labels = clustering.labels_
+            
+            clusters = {}
+            for i, label in enumerate(labels):
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(texts[i])
+            
+            # Formatear clusters para el prompt
+            output = []
+            for label, cluster_texts in clusters.items():
+                if label == -1:
+                    continue  # Ruido
+                output.append(f"Cluster {label} ({len(cluster_texts)} fragments):\n" + 
+                            "\n".join([f"- {t[:200]}" for t in cluster_texts[:3]]))
+            
+            return "\n\n".join(output) if output else ""
+        except Exception as e:
+            print(f"   [!] Error en clustering: {e}")
+            return ""
 
     def _consolidate_rem(self):
-        """Fase REM: Reorganizacion creativa, conexiones no obvias, olvido activo."""
+        """Fase REM: Genera simulaciones especulativas sobre conocimiento indexado."""
         active_summary = self.fm.stream.get_all_active_summary()
 
-        prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo.
-Modo de procesamiento: CONECTAR creativamente. Generar asociaciones no obvias.
---- END IDENTITY ---
+        # Elegir un archivo indexado para simular
+        indexed_file = ""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            # Buscar un fragmento aleatorio de procedural_index para simular sobre él
+            results = episodic.query_procedural(active_summary[:300], n_results=3)
+            if results:
+                indexed_file = results[0].get("file", "") + ": " + results[0].get("code", "")[:500]
+        except Exception:
+            pass
 
---- ACTIVE THOUGHTS ---
-{active_summary}
---- END ACTIVE ---
+        prompt = f"""--- REM SPECULATIVE SIMULATION ---
+    [ACTIVE THOUGHTS]: {active_summary}
+    [CODE TO ANALYZE]: {indexed_file[:1000] if indexed_file else 'No indexed code available'}
 
---- DIRECTIVE ---
-Identifica conexiones entre conceptos no relacionados de la informacion disponible.
-Genera un escenario contrafactual breve basado en patrones detectados.
-Responde en 1-2 frases en {IDIOMA}.
---- END DIRECTIVE ---
+    Generate a speculative analysis. Imagine a user might ask about a bug or optimization in this code.
+    What would you identify as potential issues? What solutions would you propose?
+    Respond in 2-3 sentences in {IDIOMA}. Be specific and technical."""
+        
+        consolidation = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=200, purpose="consolidacion")
+        if consolidation:
+            self.fm.stream.add_thought(ThoughtItem(
+                content=f"[REM] {consolidation}",
+                thought_type="consolidation", priority=0.8, source="internal"
+            ))
+            self.fm._store_curiosity(f"[REM] {consolidation}")
+            
+            # Guardar como speculative_insight en episodic_memory
+            try:
+                self.fm.cognitive_loop.episodic_memory.store_interaction(
+                    user_message="[Speculative analysis]",
+                    assistant_response=consolidation,
+                    user_id=self.fm.cognitive_loop.user_id,
+                    metadata={
+                        "source": "internal_monologue",
+                        "type": "speculative_insight",
+                        "importance": 0.5,
+                    }
+                )
+            except Exception:
+                pass
 
-Pensamiento:"""
-
-        consolidation = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="consolidacion")
-        self.fm.stream.add_thought(ThoughtItem(
-            content=f"[REM] {consolidation}",
-            thought_type="consolidation", priority=0.8, source="internal"
-        ))
-        self.fm._store_curiosity(f"[REM] {consolidation}")
-
+        # Consolidar Yo Narrativo
         episodios = self.fm._load_curiosities()[-10:]
         episodios_text = [c.get("thought", "") for c in episodios]
-        self.fm.cognitive_loop.self_memory.consolidate_yo_narrativo(
-            self.fm.llm, episodios_text
-        )
-
+        self.fm.cognitive_loop.self_memory.consolidate_yo_narrativo(self.fm.llm, episodios_text)
+        
         self._active_forgetting()
 
 
@@ -686,26 +826,23 @@ Mensaje:"""
             return None
 
     def _inject_immune_response(self, distance: float):
-        """Inyecta alerta neuroquímica para restaurar personalidad."""
+        """Inyecta restauración de identidad y limpia el contexto idle."""
         from core.flow.flow_stream import ThoughtItem
-
-        # Reducir prioridad de pensamientos que causaron la deriva
-        for t in self.fm.stream.active:
-            t.priority *= 0.4
-
-        # Inyectar pensamiento de restauración de identidad
+        
         self.fm.stream.add_thought(ThoughtItem(
-            content=f"[Alerta Inmune] Deriva de personalidad detectada ({distance:.2f}). "
-                    f"Restaurando directrices de identidad originales.",
-            thought_type="immune_response",
-            priority=0.95,
-            source="immune_system"
+            content=f"[Sistema Inmune] Deriva de personalidad corregida (distancia: {distance:.2f})",
+            thought_type="immune_restore",
+            priority=0.9,
+            source="system"
         ))
-
-        # Restaurar reglas de pensamiento originales
-        self.fm._store_curiosity(
-            f"[Sistema Inmune] Deriva de personalidad corregida (distancia: {distance:.2f})"
-        )
+        
+        # Solución B: Limpiar reflexiones idle del stream para romper el bucle
+        self.fm.stream.thoughts = [
+            t for t in self.fm.stream.thoughts
+            if t.source not in ("internal", "pattern_detector", "pattern_detector_event")
+            or t.type in ("user_interaction", "post_interaction", "wake")
+        ]
+        self.fm.stream._update_active()
 
     def _active_forgetting(self):
         """Olvido activo: elimina pensamientos con fuerza sináptica < 0.05."""

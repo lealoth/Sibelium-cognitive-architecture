@@ -601,10 +601,15 @@ Sé específico y personal. No repitas frases anteriores.
                 user_message="[Aprendizaje conversacional]",
                 assistant_response=learning_content,
                 user_id=self.user_id,
-                metadata={"source": "conversational_learning", "type": "validated_interaction", "outcome": outcome["outcome"], "importance": outcome.get("importance", 0.5)}
+                metadata={
+                    "source": "conversational_learning",
+                    "type": "validated_interaction",
+                    "outcome": outcome.get("outcome", ""),
+                    "importance": outcome.get("importance", 0.5),
+                }
             )
         except Exception as e:
-            print(f"   [!] Error guardando aprendizaje: {e}")
+            print(f"⚠️ Error guardando en memoria episódica: {e}")
 
     def process_action_outcome(self, action_result, context_intent: str, source: str = "generic"):
         """

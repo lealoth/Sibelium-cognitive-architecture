@@ -372,6 +372,11 @@ Responde en una frase corta en {IDIOMA}.
             for t in self.stream.active:
                 t.priority *= 0.5
             self.stream._update_active()
+            
+        # Modulación de parámetros del LLM según estrés
+        if ec > 0.80:
+            self.llm.set_cognitive_stress(ec)
+            print(f"   [Stress] ⚠️ Modo túnel activado: T=0.15, max_tokens=256")
     
     def _slow_tick(self):
         if not self.salience.is_dmn_active:

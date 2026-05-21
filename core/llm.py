@@ -28,7 +28,6 @@ PREMIUM_PURPOSES = [
 
 # Propósitos que requieren cloud por propensión a alucinación
 ALUCINATION_PRONE_PURPOSES = [
-    "simulacion_fondo",
     "prospeccion_fondo",
 ]
 
@@ -207,7 +206,12 @@ class LLMModel:
     def _generate_local(self, prompt: str, temperature: float, max_tokens: int, backend: str, purpose: str = "") -> Optional[str]:
         """Usa el modelo local apropiado con sampling avanzado."""
         model = self.model_main
-        
+        # Modo túnel: estrés alto reduce creatividad
+        cognitive_stress = getattr(self, '_cognitive_stress', 0.5)
+        if cognitive_stress > 0.80:
+            temperature = min(temperature, 0.15)
+            max_tokens = min(max_tokens, 256)
+
         kwargs = {
             "max_tokens": max_tokens,
             "temperature": temperature,

@@ -115,3 +115,15 @@ class InferenceLoop:
     def _handle_query_episodic(self, params: dict) -> Optional[str]:
         """Handler para <query_episodic query="..." />"""
         return self._fetch_fragment("episodic", params.get("query", ""))
+
+    def _extract_signatures(self, code_fragment: str) -> str:
+        """Extrae firmas de métodos y clases de un fragmento de código."""
+        import re
+        signatures = []
+        for line in code_fragment.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('def ') or stripped.startswith('class '):
+                signatures.append(stripped[:120])
+        if signatures:
+            return "Available signatures:\n" + "\n".join(signatures)
+        return ""

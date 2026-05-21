@@ -50,9 +50,10 @@ class EpisodicMemory:
                 base_metadata.update(metadata)
             self.collection.add(
                 documents=[content],
-                metadatas=[base_metadata],
+                metadatas=[self._sanitize_meta(base_metadata)],
                 ids=[document_id],
             )
+
             self._update_narrative_direction(content)
             return document_id
         
@@ -315,7 +316,13 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
         emb_arr = emb_arr / np.linalg.norm(emb_arr)
 
         alpha = min(0.25, max(0.15, len(content) / 2000.0))
-
+        
+        # Damping: si el nuevo embedding es muy distinto, reducir alpha
+        if self._narrative_direction is not None:
+            angular_distance = 1.0 - float(np.dot(emb_arr, self._narrative_direction))
+            if angular_distance > 0.5:  # Cambio brusco de tema
+                alpha *= 0.3  # Resistencia al cambio (damping γ≈0.85 equivalente)
+        
         if self._narrative_direction is None:
             self._narrative_direction = emb_arr
         else:
@@ -359,11 +366,12 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
         }
         if metadata:
             base_metadata.update(metadata)
-        self.semantic_collection.add(
+        self.collection.add(
             documents=[content],
-            metadatas=[base_metadata],
+            metadatas=[self._sanitize_meta(base_metadata)],
             ids=[document_id],
         )
+
         return document_id
 
     def query_semantic(self, query: str, n_results: int = 5) -> list:
@@ -473,6 +481,16 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
             fragments.append({"code": '\n'.join(current), "line_start": current_start, "line_end": len(lines), "class": current_class, "function": current_function})
         return fragments
 
+    def _sanitize_meta(self, meta: dict) -> dict:
+        clean = {}
+        for key, value in meta.items():
+            if value is None:
+                clean[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
+                clean[key] = value
+            else:
+                clean[key] = str(value)
+        return clean
 
 # ============================================
 # TEMPORAL FOCUS (Sistema de CPFdl Virtual)
@@ -636,3 +654,14 @@ def patch_episodic_memory_get_relevant(episodic_memory_instance):
 
     episodic_memory_instance.get_relevant = extended_get_relevant
     return episodic_memory_instance
+
+    def _sanitize_meta(self, meta: dict) -> dict:
+        clean = {}
+        for key, value in meta.items():
+            if value is None:
+                clean[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
+                clean[key] = value
+            else:
+                clean[key] = str(value)
+        return clean
