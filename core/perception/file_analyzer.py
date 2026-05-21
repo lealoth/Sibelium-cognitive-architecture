@@ -101,18 +101,13 @@ class FileAnalyzer:
         ext = path.suffix.lower()
         if ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']:
             return self._analyze_image(path, llm, self_state)
-        elif ext in ['.txt', '.md', '.json', '.csv']:
-            return self._analyze_text(path)
-        elif ext in ['.pdf']:
-            return self._analyze_pdf(path)
-        elif ext in ['.py', '.js', '.html', '.css', '.java', '.cpp']:
-            return self._analyze_code(path)
         elif ext in ['.mp3', '.wav', '.ogg', '.m4a', '.flac']:
             return self._analyze_audio(path, llm)
         elif ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm']:
             return self._analyze_video(path, llm)
         else:
-            return {"type": "unknown", "content": f"Tipo no soportado: {ext}"}
+            # Texto, código, PDF, y cualquier otro formato de texto
+            return self._analyze_text_file(path, ext, llm)
 
     def analyze_with_granularity(self, file_path: str, level: str = "detallado", llm=None) -> dict:
         path = Path(file_path)
@@ -130,15 +125,7 @@ class FileAnalyzer:
             except Exception:
                 return self.analyze(file_path, llm=llm)
 
-        lines = content.split('\n')
-        if level == "basico":
-            return self._analyze_basic(path, content, ext, llm)
-        elif level == "detallado":
-            return self._analyze_detailed(path, content, lines, ext, llm)
-        elif level == "exhaustivo":
-            return self._analyze_exhaustive(path, content, lines, ext, llm)
-        else:
-            return self.analyze(file_path, llm=llm)
+        return self._analyze_text_file(path, ext, llm, level)
 
     # ============================================
     # ANÁLISIS DE IMAGEN (VISIÓN NATIVA MULTIMODAL)
@@ -381,28 +368,48 @@ Escribe en español, en 3-5 oraciones."""
     # TEXTOS Y CÓDIGO
     # ============================================
 
-    def _analyze_text(self, path: Path) -> dict:
-        try:
-            return {"type": "text", "content": path.read_text(encoding="utf-8")[:5000], "file": path.name}
-        except Exception as e:
-            return {"type": "error", "content": f"Error: {e}"}
+    def _analyze_text_file(self, path: Path, ext: str, llm=None) -> dict:
+        """Analiza cualquier archivo de texto, código o PDF. Indexa automáticamente."""
+        
+        # Leer contenido según tipo
+        if ext == '.pdf':
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(path)
+                content = " ".join([page.extract_text() or "" for page in reader.pages])
+            except ImportError:
+                return {"type": "error", "content": "PyPDF2 no instalado."}
+            except Exception as e:
+                return {"type": "error", "content": f"Error leyendo PDF: {e}"}
+        else:
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                try:
+                    content = path.read_text(encoding="latin-1")
+                except Exception as e:
+                    return {"type": "error", "content": f"Error: {e}"}
 
-    def _analyze_pdf(self, path: Path) -> dict:
-        try:
-            from PyPDF2 import PdfReader
-            reader = PdfReader(path)
-            text = " ".join([page.extract_text() or "" for page in reader.pages])[:5000]
-            return {"type": "document", "content": text, "file": path.name}
-        except ImportError:
-            return {"type": "error", "content": "PyPDF2 no instalado."}
-        except Exception as e:
-            return {"type": "error", "content": f"Error: {e}"}
+        # Indexar universalmente
+        self._index_content(str(path), content, ext)
 
-    def _analyze_code(self, path: Path) -> dict:
-        try:
-            return {"type": "code", "content": path.read_text(encoding="utf-8")[:5000], "file": path.name, "language": path.suffix[1:]}
-        except Exception as e:
-            return {"type": "error", "content": f"Error: {e}"}
+        lines = content.split('\n')
+        result = {
+            "type": "document" if ext == '.pdf' else ("code" if ext in ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', '.css', '.html'] else "text"),
+            "file": path.name,
+            "lines": len(lines),
+            "content": content[:5000],
+        }
+
+        # Metadatos extra para código
+        if ext in ['.py', '.js', '.ts', '.java', '.cpp']:
+            functions = re.findall(r'^\s*def\s+(\w+)\s*\(', content, re.MULTILINE)
+            classes = re.findall(r'^\s*class\s+(\w+)', content, re.MULTILINE)
+            imports = [l.strip() for l in lines if l.startswith('import ') or l.startswith('from ')][:10]
+            result["language"] = ext[1:]
+            result["structure"] = {"classes": classes, "functions": functions[:20], "imports": imports}
+
+        return result
 
     # ============================================
     # GRANULARIDAD

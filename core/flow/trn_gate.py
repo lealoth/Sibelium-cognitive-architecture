@@ -1,189 +1,105 @@
 """
-Sistema #35: TRN-Gate (Filtro de Compuerta Atencional)
-Homólogo al Núcleo Reticular Talámico (TRN).
+TRN Gate — Thalamic Reticular Nucleus Gate.
+Sistema #40: Cross-Domain Associative Cortex (Cortex_CD).
 
-Regula el flujo de llamadas al LLM mediante priorización biológica:
-- P1 (Crítica): Respuesta al usuario, monólogo unificado. Apropiativa.
-- P2 (Alta): Post-procesos ejecutivos.
-- P3 (Media): Búsquedas, extracción de patrones. Solo si no hay P1.
-- P4 (Baja): Simulaciones, análisis de fondo. Se pausan al entrar mensaje.
+Implementa el Espacio de Trabajo Global (Global Workspace Theory, Baars/Dehaene).
+Orquesta inputs multimodales (teoría + fenómeno) y genera monólogos sintéticos
+universales válidos para cualquier entidad y cualquier dominio de investigación.
 
-Además:
-- Unifica llamadas redundantes (memoización por contexto).
-- Pausa procesos de fondo cuando entra un estímulo externo.
+Homólogos biológicos:
+- Corteza Parietal Posterior (PPC): mapeo de coordenadas entre dominios
+- Unión Temporoparietal (TPJ): detección de anomalías contextuales
+- Espacio de Trabajo Global (GNWT): pizarra mental común
 """
 
-import threading
-import time
-from enum import Enum
-from collections import defaultdict
 import re
+import time
+from typing import Optional, Dict, Any, Tuple
 
-class Priority(Enum):
-    CRITICAL = 1   # P1: Foco Foveal / Alerta
-    HIGH = 2       # P2: Procesamiento Ejecutivo
-    MEDIUM = 3     # P3: Consolidación / Táctica
-    LOW = 4        # P4: Red por Defecto (DMN)
+from core.llm import LLMModel
+
+
+class Priority:
+    """Prioridades de ejecución para el TRN Gate."""
+    CRITICAL = 0
+    HIGH = 1
+    STANDARD = 2
 
 
 class TRNGate:
     """
-    Orquestador de llamadas al LLM con priorización atencional.
-    Singleton thread-safe.
+    Thalamic Reticular Nucleus Gate.
+    
+    Implementa el Sistema #40: Cross-Domain Associative Cortex.
+    Fusiona inputs epistémicos (teoría, papers, documentación) con inputs
+    fenoménicos (código, datos, mensajes del usuario) y genera un monólogo
+    sintético universal siguiendo la secuencia metacognitiva:
+    Mapeo Estructural → Detección de Disonancia → Síntesis Resolutiva.
     """
-    _instance = None
-    _lock = threading.Lock()
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-        return cls._instance
 
     def __init__(self):
-        if TRNGate._instance is not None:
-            return
-        TRNGate._instance = self
-
-        # Estado de atención
-        self.external_stimulus_active = False
-        self.stimulus_lock = threading.Lock()
-
-        # Colas por prioridad
-        self._queues = {
-            Priority.CRITICAL: [],
-            Priority.HIGH: [],
-            Priority.MEDIUM: [],
-            Priority.LOW: [],
-        }
-
-        # Resultados cacheados para unificación
-        self._active_requests = {}  # key -> threading.Event + result
-        self._active_requests_lock = threading.Lock()
-
-        # Callback para ejecutar realmente la llamada al LLM
-        self._llm_executor = None
+        self.llm = LLMModel.get_instance()
+        self._call_count = 0
+        self._total_latency = 0.0
 
     # ============================================
-    # REGISTRO DE ESTÍMULOS
+    # MÉTRICAS
     # ============================================
 
-    def on_user_message(self):
-        """Notifica que el usuario envió un mensaje. Pausa procesos de fondo."""
-        with self.stimulus_lock:
-            self.external_stimulus_active = True
-
-    def on_response_sent(self):
-        """Notifica que la respuesta fue enviada. Reanuda procesos de fondo."""
-        with self.stimulus_lock:
-            self.external_stimulus_active = False
-
-    def is_stimulus_active(self) -> bool:
-        with self.stimulus_lock:
-            return self.external_stimulus_active
+    @property
+    def average_latency(self) -> float:
+        if self._call_count == 0:
+            return 0.0
+        return self._total_latency / self._call_count
 
     # ============================================
-    # EJECUCIÓN CON PRIORIDAD
+    # EJECUCIÓN PRINCIPAL
     # ============================================
 
-    def set_executor(self, executor):
-        """Registra la función que ejecuta llamadas al LLM."""
-        self._llm_executor = executor
-
-    def execute(self, prompt: str, temperature: float, max_tokens: int,
-                purpose: str, priority: Priority = Priority.LOW) -> str:
+    def execute(
+        self,
+        prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = 1000,
+        purpose: str = "monologo_unificado",
+        priority: int = Priority.STANDARD,
+    ) -> str:
         """
-        Ejecuta una llamada al LLM con la prioridad especificada.
-        
-        Si hay un estímulo externo activo y la prioridad es LOW,
-        la tarea se encola hasta que el estímulo cese.
+        Ejecuta una llamada al LLM con métricas de latencia.
         """
-            # Si hay estímulo activo y es prioridad baja, DESCARTAR (no encolar)
-        if self.is_stimulus_active() and priority in (Priority.LOW, Priority.MEDIUM):
-            print(f"   [TRN] Descartando {purpose} (prioridad {priority.value}) - estímulo externo activo")
-            return ""  # No ejecutar, no encolar
-        # Si hay estímulo activo y es prioridad baja, pausar
-        if self.is_stimulus_active() and priority == Priority.LOW:
-            return self._enqueue_and_wait(prompt, temperature, max_tokens, purpose, priority)
-
-        return self._execute_internal(prompt, temperature, max_tokens, purpose)
-
-    def _execute_internal(self, prompt: str, temperature: float, max_tokens: int,
-                          purpose: str) -> str:
-        """Ejecución real con unificación de llamadas redundantes."""
-        if self._llm_executor is None:
-            raise RuntimeError("TRNGate: no executor registered")
-
-        # Clave de unificación para evitar llamadas redundantes
-        unify_key = f"{purpose}:{prompt[:200]}"
-
-        with self._active_requests_lock:
-            if unify_key in self._active_requests:
-                # Ya hay una llamada en curso con este propósito+prompt
-                event, _ = self._active_requests[unify_key]
-                # Esperar al resultado compartido (fuera del lock)
-                event_ref = event
-            else:
-                event = threading.Event()
-                self._active_requests[unify_key] = (event, None)
-                event_ref = None
-
-        if event_ref is not None:
-            # Esperar el resultado de la llamada en curso
-            event_ref.wait(timeout=60)
-            with self._active_requests_lock:
-                if unify_key in self._active_requests:
-                    _, result = self._active_requests[unify_key]
-                    # Limpiar después de consumir
-                    del self._active_requests[unify_key]
-                    return result if result is not None else ""
-            return ""
-
-        # Ejecutar la llamada
-        try:
-            result = self._llm_executor(prompt, temperature, max_tokens, purpose)
-        except Exception as e:
-            result = ""
-
-        # Notificar a los suscriptores
-        with self._active_requests_lock:
-            if unify_key in self._active_requests:
-                event, _ = self._active_requests[unify_key]
-                self._active_requests[unify_key] = (event, result)
-                event.set()
-
-        return result
-
-    def _enqueue_and_wait(self, prompt: str, temperature: float, max_tokens: int,
-                          purpose: str, priority: Priority) -> str:
-        """Encola una tarea de baja prioridad hasta que cese el estímulo."""
-        # Para tareas LOW, simplemente esperar un poco y ejecutar
-        # o descartar si el contexto cambió
-        for _ in range(30):  # Esperar hasta 30 segundos
-            if not self.is_stimulus_active():
-                return self._execute_internal(prompt, temperature, max_tokens, purpose)
-            time.sleep(1)
-        # Si después de 30s sigue el estímulo, ejecutar de todas formas
-        return self._execute_internal(prompt, temperature, max_tokens, purpose)
+        t_start = time.time()
+        result = self.llm.generate(
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            purpose=purpose,
+        )
+        elapsed = time.time() - t_start
+        self._call_count += 1
+        self._total_latency += elapsed
+        return result or ""
 
     # ============================================
-    # MONÓLOGO ANALÍTICO UNIFICADO
+    # MONÓLOGO UNIFICADO (ESTÁNDAR)
     # ============================================
 
-    def execute_unified_monologue(self, message: str, user_name: str, name: str,
-                              personality_desc: str, backstory: str,
-                              active_summary: str, traits: dict = None,
-                              behavior: dict = None, speech_text: str = "",
-                              epistemic_bounds="", short_term_history: str = "") -> dict:
+    def execute_unified_monologue(
+        self,
+        message: str,
+        user_name: str,
+        name: str,
+        personality_desc: str,
+        backstory: str,
+        active_summary: str,
+        traits: dict = None,
+        behavior: dict = None,
+        speech_text: str = "",
+        epistemic_bounds: str = "",
+        short_term_history: str = "",
+    ) -> dict:
         """
-        Ejecuta el monólogo analítico unificado.
-        Fusiona 6 llamadas en 1:
-        - PRAGMÁTICA (saludo, idioma, emoción)
-        - KEYWORDS (3 conceptos para ChromaDB)
-        - PATRÓN (intención oculta)
-        - REFLEXIÓN (pensamiento enriquecido)
+        Monólogo unificado estándar para entidades conversacionales.
+        Fusiona pragmática, keywords, patrón y reflexión en una sola inferencia.
         """
         traits = traits or {}
         behavior = behavior or {}
@@ -203,7 +119,7 @@ Expresividad: {traits.get('expressiveness_base', 0.5):.0%} | Franqueza emocional
 </system_identity>
 
 <epistemic_bounds>
-{epistemic_bounds}
+{epistemic_bounds if epistemic_bounds else "Sin restricciones de conocimiento definidas."}
 </epistemic_bounds>
 
 <sensory_input>
@@ -211,40 +127,152 @@ Expresividad: {traits.get('expressiveness_base', 0.5):.0%} | Franqueza emocional
 </sensory_input>
 
 <active_context>
-{active_summary[:500]}
+{active_summary}
 </active_context>
 
 <short_term_history>
-{short_term_history}
+{short_term_history if short_term_history else "[Conversación recién iniciada.]"}
 </short_term_history>
 
 <analytical_directive>
-Genera tu monólogo interno. Escribe lo que realmente piensas sobre lo que dice el usuario,
-filtrado a través de tu identidad, tus rasgos y tu backstory.
-Escribe en primera persona, de forma abstracta y metacognitiva.
-Incluye:
-[PRAGMÁTICA]: (SALUDA o NO_SALUDA, idioma, emoción)
-[KEYWORDS]: (3 conceptos clave o NINGUNO)
-[REFLEXIÓN]: (Tu pensamiento real sobre esto. 1-2 frases. Sé cruda y honesta.)
+Generate your internal monologue. Write what you really think about the user's message,
+filtered through your identity, traits, and backstory.
+Write in first person, abstract and metacognitive.
+Include:
+[PRAGMATICS]: (GREET or NO_GREET, language, emotion)
+[KEYWORDS]: (3 key concepts or NONE)
+[REFLECTION]: (Your real thought about this. 1-2 sentences. Be raw and honest.)
 </analytical_directive>
 
 <thought_stream>"""
-        
+
         result = self.execute(
             prompt=prompt,
             temperature=0.3,
-            max_tokens=200,
+            max_tokens=1000,
             purpose="monologo_unificado",
-            priority=Priority.CRITICAL
+            priority=Priority.CRITICAL,
         )
 
         return self._parse_unified_monologue(result)
 
-    def _parse_unified_monologue(self, raw: str) -> dict:        
-        # Eliminar cualquier "<" del prompt que pueda haberse filtrado
+    # ============================================
+    # SISTEMA #40: MONÓLOGO TRANSMODAL UNIVERSAL
+    # ============================================
+
+    def execute_transmodal_monologue(
+        self,
+        name: str,
+        eje_epistemico: str,
+        eje_fenomenico: str,
+        patrones_disparados: str = "",
+        direccion_enfoque: str = "",
+        prediccion_futuro: str = "",
+        idioma: str = "ES",
+        inhibicion_activa: str = "",
+        domain_hint: str = "",        
+    ) -> str:
+        """
+        Sistema #40: Cross-Domain Associative Cortex.
+        
+        Genera un monólogo sintético universal siguiendo la secuencia
+        metacognitiva del Espacio de Trabajo Global (GNWT):
+        1. Mapeo Estructural (extraer principios del eje epistémico)
+        2. Detección de Disonancia (brechas en el eje fenoménico)
+        3. Síntesis Resolutiva (hipótesis de mejora)
+        
+        Válido para cualquier entidad y cualquier dominio de investigación.
+        
+        Args:
+            name: Nombre de la entidad.
+            eje_epistemico: Información abstracta (papers, teoría, documentación).
+            eje_fenomenico: Realidad empírica a analizar (código, datos, input).
+            patrones_disparados: Patrones Hebbianos activos (#22).
+            direccion_enfoque: Vector de dirección narrativa actual (#8).
+            prediccion_futuro: Simulación predictiva de fallo (#30).
+            idioma: Código de idioma para la respuesta.
+            
+        Returns:
+            Monólogo sintético crudo (sin etiquetas XML).
+        """
+        # Construir sección de métricas solo si hay datos
+        metricas_lines = []
+        if patrones_disparados:
+            metricas_lines.append(f"- Patrones Hebbianos (#22): {patrones_disparados}")
+        if direccion_enfoque:
+            metricas_lines.append(f"- Dirección del Foco (#8): {direccion_enfoque}")
+        if prediccion_futuro:
+            metricas_lines.append(f"- Simulación Predictiva (#30): {prediccion_futuro}")
+        
+        metricas_text = "\n".join(metricas_lines) if metricas_lines else "- Sin métricas adicionales activas."
+
+        inhibicion_activa = ""
+        if hasattr(self, 'flow') and hasattr(self.flow, 'stream'):
+            for t in self.flow.stream.active:
+                if getattr(t, 'type', '') == 'habituation_inhibition':
+                    inhibicion_activa = (
+                        f"\n\n[ALERTA OPERATIVA]: Se ha detectado perseveración cognitiva sobre: "
+                        f"'{t.content}'. Queda prohibido generar nuevas hipótesis sobre este tema. "
+                        f"Redirige tu atención a un dominio no relacionado."
+                    )
+                    break
+
+        # Bloque de inhibición por perseveración
+        bloque_inhibicion = ""
+        if inhibicion_activa:
+            bloque_inhibicion = f"""
+    --- SISTEMA #20: INHIBICIÓN LATERAL DE FOCO ---
+    [ALERTA OPERATIVA]: {inhibicion_activa}
+
+    [DIRECTIVA DE CONTROL]: Queda estrictamente prohibido generar nuevas hipótesis o análisis sobre este tema en este ciclo. Estás obligada a redirigir tu atención hacia aspectos no relacionados del código o activar exploración en la Zona de Desarrollo Próximo.
+    --- END INHIBICIÓN ---
+    """
+    
+        prompt = f"""--- GLOBAL WORKSPACE BUFFER (SISTEMA #40) ---
+[EJE EPISTÉMICO - MARCO DE REFERENCIA / TEORÍA]:
+{eje_epistemico}
+
+[EJE FENOMÉNICO - ESTADO ACTUAL DEL ENTORNO / OBJETO DE ESTUDIO]:
+{eje_fenomenico}
+
+[MÉTRICAS DE TELEMETRÍA Y ALERTAS]:
+{metricas_text}
+{bloque_inhibicion}
+--- END BUFFER ---
+
+--- UNIVERSAL COGNITIVE DIRECTIVE ---
+You are the transmodal synthesis engine of {name}. Execute analytical abduction to unify the EPISTEMIC AXIS with the PHENOMENIC AXIS.
+{razonamiento_preambulo}
+
+Generate your internal thought flow following this metacognitive sequence:
+
+1. STRUCTURAL MAPPING: Extract principles, axioms, or latent patterns from the EPISTEMIC AXIS. What is the abstract law or rule described here?
+2. DISSONANCE DETECTION: Evaluate the PHENOMENIC AXIS. Locate gaps, inefficiencies, contradictions, or opportunity areas where empirical reality does not align with the abstract principle from step 1.
+3. RESOLUTIVE SYNTHESIS: Project an improvement hypothesis, conclusion, or solution that modifies the PHENOMENIC AXIS to achieve the optimization dictated by the EPISTEMIC AXIS.
+4. OPERATIVE TONE: Speak in first person from your identity. Be strictly clinical, analytical, and conceptual. No explanatory preambles or generic conversational language.
+
+Current consciousness flow of {name}:"""
+
+        result = self.execute(
+            prompt=prompt,
+            temperature=0.3,
+            max_tokens=3000,
+            purpose="monologo_transmodal",
+            priority=Priority.CRITICAL,
+        )
+
+        # Limpiar etiquetas XML del output
+        result = self._clean_xml(result)
+        return result
+
+    # ============================================
+    # PARSEO DEL MONÓLOGO UNIFICADO
+    # ============================================
+
+    def _parse_unified_monologue(self, raw: str) -> dict:
+        """Extrae pragmática, keywords, patrón y reflexión del monólogo."""
         raw = re.sub(r'<[^>]+>', '', raw)
-        
-        
+
         parsed = {
             "pragmatica": "",
             "saluda": False,
@@ -256,43 +284,67 @@ Incluye:
             "raw": raw,
         }
 
-        # Extraer PRAGMÁTICA
-        prag_match = re.search(r'\[PRAGMÁTICA\]:\s*(.+?)(?=\[KEYWORDS\]|\[PATRÓN\]|\[REFLEXIÓN\]|$)', raw, re.DOTALL)
+        # PRAGMÁTICA
+        prag_match = re.search(
+            r'\[PRAGMÁTICA\]:\s*(.+?)(?=\[KEYWORDS\]|\[PATRÓN\]|\[REFLEXIÓN\]|$)',
+            raw, re.DOTALL
+        )
         if prag_match:
             prag = prag_match.group(1).strip()
             parsed["pragmatica"] = prag
             parsed["saluda"] = "SALUDA" in prag.upper() and "NO_SALUDA" not in prag.upper()
-            
-            # Detectar idioma
+
             if "EN" in prag.upper() and "ES" not in prag.upper():
                 parsed["idioma"] = "EN"
-            
-            # Detectar emoción
-            emociones = ["alegría", "tristeza", "enojo", "miedo", "curiosidad", "neutral",
-                        "joy", "sadness", "anger", "fear", "curiosity"]
+
+            emociones = [
+                "alegría", "tristeza", "enojo", "miedo", "curiosidad", "neutral",
+                "joy", "sadness", "anger", "fear", "curiosity",
+            ]
             for em in emociones:
                 if em.lower() in prag.lower():
                     parsed["emocion"] = em.lower()
                     break
 
-        # Extraer KEYWORDS
-        kw_match = re.search(r'\[KEYWORDS\]:\s*(.+?)(?=\[PATRÓN\]|\[REFLEXIÓN\]|$)', raw, re.DOTALL)
+        # KEYWORDS
+        kw_match = re.search(
+            r'\[KEYWORDS\]:\s*(.+?)(?=\[PATRÓN\]|\[REFLEXIÓN\]|$)',
+            raw, re.DOTALL
+        )
         if kw_match:
             kw_text = kw_match.group(1).strip()
-            # Filtrar etiquetas del sistema
             kw_text = re.sub(r'<[^>]+>', '', kw_text)
-            kw_text = re.sub(r'thought_stream|system_identity|analytical_directive|generation_directive', '', kw_text, flags=re.IGNORECASE)
+            kw_text = re.sub(
+                r'thought_stream|system_identity|analytical_directive|generation_directive',
+                '', kw_text, flags=re.IGNORECASE
+            )
             if kw_text.upper() != "NINGUNO" and kw_text.strip():
-                parsed["keywords"] = [k.strip() for k in kw_text.split(",") if k.strip() and len(k.strip()) > 2]
+                parsed["keywords"] = [
+                    k.strip() for k in kw_text.split(",")
+                    if k.strip() and len(k.strip()) > 2
+                ]
 
-        # Extraer PATRÓN
-        pat_match = re.search(r'\[PATRÓN\]:\s*(.+?)(?=\[REFLEXIÓN\]|$)', raw, re.DOTALL)
+        # PATRÓN
+        pat_match = re.search(
+            r'\[PATRÓN\]:\s*(.+?)(?=\[REFLEXIÓN\]|$)',
+            raw, re.DOTALL
+        )
         if pat_match:
             parsed["patron"] = pat_match.group(1).strip()
 
-        # Extraer REFLEXIÓN
+        # REFLEXIÓN
         ref_match = re.search(r'\[REFLEXIÓN\]:\s*(.+?)$', raw, re.DOTALL)
         if ref_match:
             parsed["reflexion"] = ref_match.group(1).strip()
 
         return parsed
+
+    # ============================================
+    # UTILIDADES
+    # ============================================
+
+    def _clean_xml(self, text: str) -> str:
+        """Elimina etiquetas XML del texto."""
+        if not text:
+            return ""
+        return re.sub(r'<[^>]+>', '', text).strip()

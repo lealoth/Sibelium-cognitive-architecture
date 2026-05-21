@@ -60,7 +60,9 @@ class FlowInteraction:
         )
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("respuesta_final")
-        response_text = self.fm.llm.generate(prompt, temperature=temp, max_tokens=800, purpose="respuesta_final")
+        from core.inference_loop import InferenceLoop
+        loop = InferenceLoop(self.fm.llm, self.fm.cognitive_loop.episodic_memory)
+        response_text = loop.run(prompt, temperature=0.8, max_tokens=800, purpose="respuesta_final")
 
         # Post-procesos
         self._post_process_response(response_text, message, name)
@@ -157,11 +159,12 @@ class FlowInteraction:
         {epistemic}
         --- END BOUNDS ---
         """
+        computational = persona.get("computational_bounds", "")
+        if computational:
+            prompt += f"--- COMPUTATIONAL BOUNDS ---\n{computational}\n--- END COMPUTATIONAL BOUNDS ---\n"
 
-        prompt += f"""--- SOCIAL ---
-    {saludo}
-    --- END SOCIAL ---
-    """
+        prompt += f"--- HISTORY ---\n{self.fm.cognitive_loop._get_short_term_history(name, user_name)}\n--- END HISTORY ---\n"
+
         # Secciones condicionales
         sections = {
             "MEMORY": fetched.get("MEMORY", ""),
@@ -173,6 +176,17 @@ class FlowInteraction:
         for tag, content in sections.items():
             if tag in needs.upper() and content:
                 prompt += f"--- {tag} ---\n{content}\n--- END {tag} ---\n"
+
+        # Aprendizajes conversacionales previos
+        aprendizajes = self._fetch_learnings(message)
+        if aprendizajes:
+            prompt += f"--- LEARNINGS ---\n{aprendizajes}\n--- END LEARNINGS ---\n"
+
+        # Priming semántico universal
+        if "MEMORY" in needs.upper() or "SELF" in needs.upper():
+            semantic_context = self._fetch_semantic_context(message)
+            if semantic_context:
+                prompt += f"--- KNOWLEDGE ---\n{semantic_context}\n--- END KNOWLEDGE ---\n"
 
         prompt += f"""--- USER INPUT ---
 {user_name}: "{message}"
@@ -201,7 +215,32 @@ Responde a {user_name}.
         print(f"   [Prompt] Tamaño: ~{len(prompt)//4} tokens")
         return prompt
 
+    def _fetch_learnings(self, message: str) -> str:
+        """Recupera aprendizajes conversacionales previos (top 2, máx 300 chars)."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.collection.query(
+                query_texts=[message[:300]],
+                n_results=2,
+                where={"type": "validated_interaction"}
+            )
+            docs = results.get("documents", [[]])[0]
+            if docs:
+                return "\n---\n".join([d[:300] for d in docs])
+        except Exception:
+            pass
+        return ""
 
+    def _fetch_semantic_context(self, message: str) -> str:
+        """Busca conocimiento relevante en semantic_library."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.query_semantic(query=message[:500], n_results=3)
+            if results:
+                return "\n---\n".join([r["content"][:400] for r in results])
+        except Exception:
+            pass
+        return ""
     # ============================================
     # ROUTER + FETCH
     # ============================================
@@ -298,20 +337,56 @@ Responde a {user_name}.
         return ""
 
     def _fetch_memory(self, user_msg: str, temporal_focus: str = "recent") -> str:
+        """
+        Recupera memorias con vecindad asociativa (Sistema #33) y foco temporal modulado.
+        Incluye LTP Hebbiana: refuerza importancia de las memorias inyectadas.
+        """
         try:
             results = self.associative_memory.get_relevant_with_neighbors(
-                query=user_msg, user_id=self.fm.cognitive_loop.user_id,
-                limit=5, max_neighbors_per_memory=5, temporal_focus=temporal_focus,
+                query=user_msg,
+                user_id=self.fm.cognitive_loop.user_id,
+                limit=5,
+                max_neighbors_per_memory=5,
+                temporal_focus=temporal_focus,
             )
             if not results:
                 older = self._progressive_memory_search(user_msg)
-                return "MEMORIAS:\n" + "\n".join([f"- {m}" for m in older[:5]]) if older else ""
-            # LTP Hebbiana
-            self._reinforce_memories(results[:3])
-            print(f"   [Memory] Recuperadas {len(results)} memorias" if results else "   [Memory] Sin resultados")
-            return self.associative_memory.build_context_block(results, max_total_chars=1500, max_neighbor_chars=300)
+                if older:
+                    fragmentos = [m[:400] for m in older[:3]]
+                    return "<episodic_memory>\n" + "\n---\n".join(fragmentos) + "\n</episodic_memory>"
+                return ""
+
+            # LTP Hebbiana: reforzar importancia de las 3 memorias inyectadas
+            memorias_inyectadas = results[:3]
+            ids_a_actualizar = []
+            metadatas_a_actualizar = []
+            
+            for r in memorias_inyectadas:
+                meta = r.get("metadata", {}) or {}
+                importancia_actual = meta.get("importance", 0.5)
+                nueva_imp = min(1.0, importancia_actual + 0.05)
+                nueva_meta = {**meta, "importance": nueva_imp}
+                ids_a_actualizar.append(r["primary_id"])
+                nueva_meta["last_accessed"] = datetime.now().isoformat()
+                metadatas_a_actualizar.append(nueva_meta)
+            
+            if ids_a_actualizar:
+                try:
+                    em = self.fm.associative_memory._em
+                    em.collection.update(ids=ids_a_actualizar, metadatas=metadatas_a_actualizar)
+                except Exception:
+                    pass
+
+            # Top 3-5 fragmentos, máximo 400 chars cada uno
+            fragmentos = []
+            for r in results[:5]:
+                texto = r["primary"] if isinstance(r, dict) else r
+                fragmentos.append(texto[:400])
+
+            return "<episodic_memory>\n" + "\n---\n".join(fragmentos) + "\n</episodic_memory>"
+
         except Exception as e:
-            print(f"   [!] Error en _fetch_memory: {e}")
+            print(f"   [!] Error en _fetch_memory asociativa: {e}")
             return ""
 
     def _reinforce_memories(self, memories):
@@ -384,10 +459,19 @@ Responde a {user_name}.
             return "el usuario"
 
     def _speech_text(self, persona: dict, name: str) -> str:
-        examples = persona.get("speech_examples", [])
+        examples = persona.get("speech_examples", "")
         if not examples:
             return ""
-        return "\n\n".join([f'Input: "{ex["user"]}"\n{name}: "{ex["assistant"]}"' for ex in examples[:2]])
+        # Si es un string simple, devolverlo tal cual
+        if isinstance(examples, str):
+            return examples
+        # Si es una lista de dicts (formato antiguo)
+        if isinstance(examples, list) and examples:
+            return "\n\n".join([
+                f'Input: "{ex.get("user", "")}"\n{name}: "{ex.get("assistant", "")}"'
+                for ex in examples[:2]
+            ])
+        return ""
 
     def _clean_reflexion(self, reflexion: str) -> str:
         if not reflexion:

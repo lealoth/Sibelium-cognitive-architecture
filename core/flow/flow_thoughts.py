@@ -35,7 +35,7 @@ class FlowThoughts:
         backstory = persona.get("backstory", "")
 
         prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+Eres el núcleo cognitivo de {persona.get('name', '')}.
 {personality_desc}
 Tu tarea actual es el MONÓLOGO INTERNO.
 Aquí no hablas con el usuario; procesas tus propios sesgos e ideas en silencio.
@@ -66,6 +66,9 @@ Pensamiento:"""
         self.fm.last_thought_time = datetime.now()
         self.fm._store_curiosity(f"[Reflexion] {enriched_thought}")
         self.fm.pattern_extractor.analyze_reflection(enriched_thought)
+
+        self.fm.maintenance._consolidate_reflection(enriched_thought, "reflection")
+
     
     def _generate_curiosity(self):
         if self.fm.last_message_time:
@@ -77,7 +80,7 @@ Pensamiento:"""
         thought_rules = self._get_thought_rules()
         
         persona = self.fm.cognitive_loop.load_persona()
-        name = persona.get("name", "Nexus")
+        name = persona.get("name", "")
         personality_desc = persona.get("personality_desc", "")
         backstory = persona.get("backstory", "")
         
@@ -110,6 +113,10 @@ Pensamiento:"""
         self.fm.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="curiosity", priority=0.5, source="internal"))
         self.fm.last_thought_time = datetime.now()
         self.fm._store_curiosity(enriched_thought)
+
+        # Guardar reflexión en memoria episódica para recuperación semántica
+        self.fm.maintenance._consolidate_reflection(enriched_thought, "reflection")            
+
     
     def _generate_simulation(self):
         active_summary = self.fm.stream.get_all_active_summary()
@@ -137,7 +144,7 @@ Pensamiento:"""
         backstory = persona.get("backstory", "")
 
         prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+Eres el núcleo cognitivo de {persona.get('name', '')}.
 Tu tarea actual es SIMULACIÓN INTERNA.
 Aquí no hablas con el usuario; procesas escenarios hipotéticos en silencio.
 --- END IDENTITY ---
@@ -407,7 +414,7 @@ Pensamiento:"""
         personality_desc = persona.get("personality_desc", "")
         backstory = persona.get("backstory", "")
         prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+Eres el núcleo cognitivo de {persona.get('name', '')}.
 Tu tarea actual es PROSPECCIÓN INTERNA.
 Aquí no hablas con el usuario; proyectas escenarios futuros en silencio.
 --- END IDENTITY ---

@@ -43,12 +43,27 @@ class FlowManager:
         from core.memory.associative_memory import AssociativeMemory, patch_episodic_memory_get_relevant
         from core.flow.trn_gate import TRNGate, Priority
         from core.flow.salience_network import SalienceNetwork
+        from core.flow.trn_gate import TRNGate
+        from core.perception.deep_reader import DeepReader
+
+        self.deep_reader = DeepReader(llm=self.llm)
+
+        self.trn_gate = TRNGate()
         self.salience = SalienceNetwork.get_instance()
-        self.trn_gate = TRNGate.get_instance()
-        self.trn_gate.set_executor(self._execute_llm)
+        
         base_episodic = EpisodicMemory()
         patched_episodic = patch_episodic_memory_get_relevant(base_episodic)
         self.associative_memory = AssociativeMemory(patched_episodic)
+
+        # Indexar codebase si code_index está vacío
+        if hasattr(self.cognitive_loop.episodic_memory, 'code_collection'):
+            try:
+                if self.cognitive_loop.episodic_memory.code_collection.count() == 0:
+                    from mods.self_engineer.code_reader import CodeReader
+                    reader = CodeReader(Path.cwd())
+                    self.cognitive_loop.episodic_memory.index_codebase(reader)
+            except Exception:
+                pass
 
         self.stream._get_entity_context = self._get_entity_context
         self.stream._get_entity_context = self._get_entity_context
@@ -182,7 +197,7 @@ class FlowManager:
                 
                 if self._last_emotion is not None and str(self._last_emotion) != str(new_emotion):
                     prompt = f"""<system_identity>
-Eres el núcleo cognitivo de Nexus. Procesando un cambio de estado interno.
+Eres el núcleo cognitivo. Procesando un cambio de estado interno.
 </system_identity>
 
 <state_change>
@@ -406,6 +421,13 @@ Responde en una frase corta en {IDIOMA}.
         self.maintenance._run_detector_decay()
         self.maintenance._run_immune_check()
 
+        # Habituación Semántica (Sistema #20 extendido)
+        habituation = self.maintenance._check_semantic_habituation()
+        if habituation and habituation.get("detected"):
+            tema = habituation.get("tema", "tema recurrente")
+            print(f"   [Habituation] ⚠️ Perseveración detectada: '{tema}'. Inyectando inhibición.")
+            self._inject_habituation_inhibition(tema)
+
         # Olvido activo cada 60 minutos
         now = datetime.now()
         if not hasattr(self, '_last_active_forgetting'):
@@ -418,16 +440,43 @@ Responde en una frase corta en {IDIOMA}.
         #self.maintenance._run_deduplicate()
         
         self._save_snapshot("active")
-    
+
+        # Destilación cada 2 horas
+        if not hasattr(self, '_last_distillation'):
+            self._last_distillation = None
+        now = datetime.now()
+        if self._last_distillation is None or (now - self._last_distillation).total_seconds() >= 7200:
+            self._last_distillation = now
+            self.cognitive_loop._distill_to_semantic()
+            
     # ============================================
     # INTERACCIÓN CON EL USUARIO
     # ============================================
     
+    def _inject_habituation_inhibition(self, tema: str):
+        """Inyecta inhibición colinérgica forzada en el stream de pensamientos."""
+        from core.flow.flow_stream import ThoughtItem
+        
+        # Reducir prioridad de pensamientos sobre este tema
+        for t in self.stream.active:
+            t.priority *= 0.3
+        
+        # Inyectar pensamiento de redirección
+        self.stream.add_thought(ThoughtItem(
+            content=f"[Inhibición] Perseveración detectada sobre: '{tema}'. "
+                    f"Cambio obligatorio de foco. Explorar dominio no relacionado.",
+            thought_type="habituation_inhibition",
+            priority=0.9,
+            source="system"
+        ))
+        self.last_thought_time = datetime.now()
+        
+        # Guardar en curiosidades
+        self._store_curiosity(f"[Habituation] Inhibición por perseveración: {tema}")
+
     def handle_user_message(self, message: str) -> dict:
         # Activar Red de Saliencia: inhibir DMN
         self.salience.on_user_message()
-
-        self.trn_gate.on_user_message()
 
         # Atenuar la DMN en lugar de pausarla estáticamente (factor de inhibición GABA)
         for t in self.stream.thoughts:
@@ -464,7 +513,6 @@ Responde en una frase corta en {IDIOMA}.
         self._restore_attention()
         self.last_thought_time = datetime.now()
 
-        self.trn_gate.on_response_sent()
         self.salience.on_response_sent()  # Reactivar DMN
         return result
     
@@ -535,34 +583,20 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
         else:
             file_to_analyze = self._select_optimal_file(files)
         
-        from core.perception.file_analyzer import FileAnalyzer
-        result = FileAnalyzer.get_instance().analyze_with_granularity(
-            str(file_to_analyze), level="detallado", llm=self.llm
-        )
-        
-        rel_path = str(file_to_analyze.relative_to(EXPLORE_DIR))
-        self._store_exploration(rel_path, result)
-        
-        from core.memory.scaffolding import ScaffoldingManager
-        file_type = result.get("type", "unknown")
-        ScaffoldingManager().register_exploration(file_type, rel_path, result)
-        
-        if result.get("type") == "text":
-            content = result.get("content", "")
-        else:
-            content = result.get("summary", result.get("description", result.get("content", "")))
-        base_thought = f"Exploré {file_to_analyze.name}: {content}"
+        from core.perception.universal_indexer import UniversalIndexer
 
-        # Anclaje de Metadatos Relacionales: preservar el contexto macro del archivo
-        macro_context = f"[Origen: {rel_path} | Tipo: {file_type}]"
-        if content:
-            content = f"{macro_context}\n{content}"
-        enriched_thought = self.thoughts._enrich_thought_with_context(base_thought, "exploration", content if content else None)
-        
-        self.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="exploration", priority=0.5, source="file_exploration"))
-        self.last_thought_time = datetime.now()
-        self._store_curiosity(f"[Exploracion] {file_to_analyze.name}: {enriched_thought}")
-        print(f"   [Explore] {rel_path} ({file_type})")
+        # Leer contenido
+        content = file_to_analyze.read_text(encoding='utf-8')
+
+        # Indexar sin LLM
+        indexer = UniversalIndexer(self.cognitive_loop.episodic_memory)
+        fragments = indexer.index_file(
+            file_path=str(file_to_analyze),
+            content=content,
+            file_type="text"
+        )
+
+        print(f"   [Explore] {rel_path} → {fragments} fragmentos indexados en semantic_library")
     
     # ============================================
     # UTILIDADES
@@ -624,12 +658,12 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
         except:
             elapsed_str = "desconocido"
         
-        self.stream.add_thought(ThoughtItem(
-            content=f"[SISTEMA] Servidor reiniciado. Tiempo inactivo: {elapsed_str}. No hubo procesamiento durante este periodo.",
-            thought_type="wake",
-            priority=0.7,
-            source="system"
-        ))
+        #self.stream.add_thought(ThoughtItem(
+        #    content=f"[SISTEMA] Servidor reiniciado. Tiempo inactivo: {elapsed_str}. No hubo procesamiento durante este periodo.",
+        #    thought_type="wake",
+        #    priority=0.7,
+        #    source="system"
+        #))
         
         self_state = self.cognitive_loop.self_memory.load_state()
         if "evolucion" not in self_state:
@@ -640,7 +674,7 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
             "duracion_apagado": elapsed_str
         })
         self.cognitive_loop.self_memory.save_state(self_state)
-    
+        
     def _guard_state_changes(self, state_before):
         state_after = self.cognitive_loop.self_memory.load_state()
         confianza_before = state_before.get("relacion_con_usuario", {}).get("confianza", 0.5)

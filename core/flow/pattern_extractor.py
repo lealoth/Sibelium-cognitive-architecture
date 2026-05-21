@@ -221,48 +221,94 @@ Si no hay patrón: SIN_PATRON"""
     # ============================================
 
     def _deduplicate_loaded(self, data: list) -> list:
+        """Deduplica usando embeddings en lugar de LLM."""
         if len(data) <= 1:
             return data
-
-        from core.llm import LLMModel
-        llm = LLMModel.get_instance()
+        
+        # Cachear embeddings de todos los detectores cargados
+        embeddings = []
+        for item in data:
+            emb = self._get_embedding(item.get("condition_text", ""))
+            embeddings.append(emb)
+        
         redundant = set()
-
-        for i, item in enumerate(data):
-            others = [d for j, d in enumerate(data) if j != i][:15]
-            others_text = "\n".join([
-                f"{idx+1}. {d.get('condition_text', '')[:100]} | {d.get('reaction_text', '')[:100]}"
-                for idx, d in enumerate(others)
-            ])
-            prompt = f"""¿Este detector es FUNCIONALMENTE REDUNDANTE con alguno de la lista?
-DETECTOR: "{item.get('condition_text', '')[:120]}" → "{item.get('reaction_text', '')[:120]}"
-LISTA:
-{others_text}
-Responde SOLO SI o NO."""
-            try:
-                if "SI" in llm.generate(prompt, temperature=0.1, max_tokens=3, purpose="deduplicar_detectores").upper():
-                    redundant.add(i)
-            except Exception:
+        for i in range(len(data)):
+            if embeddings[i] is None:
                 continue
-
+            emb_i = np.array(embeddings[i])
+            emb_i_norm = emb_i / max(np.linalg.norm(emb_i), 1e-8)
+            
+            for j in range(i + 1, len(data)):
+                if embeddings[j] is None:
+                    continue
+                emb_j = np.array(embeddings[j])
+                emb_j_norm = emb_j / max(np.linalg.norm(emb_j), 1e-8)
+                sim = np.dot(emb_i_norm, emb_j_norm)
+                
+                if sim > 0.85:
+                    redundant.add(j)  # El más nuevo (índice mayor) es redundante
+        
         return [item for i, item in enumerate(data) if i not in redundant]
 
     def _is_duplicate(self, condition: str) -> bool:
+        """
+        Filtro híbrido de redundancia (Giro Dentado + Gating Cortical).
+        - Paso 1: Comparación vectorial (sin LLM, ultrarrápido)
+        - Paso 2: Si está en zona de incertidumbre (0.85-0.94), validar con LLM
+        """
         if not self.active_detectors:
             return False
+        
+        new_emb = self._get_embedding(condition)
+        if new_emb is None:
+            return False
+        
+        new_arr = np.array(new_emb)
+        new_norm = new_arr / max(np.linalg.norm(new_arr), 1e-8)
+        
+        for d in self.active_detectors[-10:]:
+            cond_emb = d.get("_condition_embedding")
+            if cond_emb is None:
+                cond_emb = self._get_embedding(d.get("condition_text", ""))
+                if cond_emb is None:
+                    continue
+                d["_condition_embedding"] = cond_emb
+            
+            cond_arr = np.array(cond_emb)
+            cond_norm = cond_arr / max(np.linalg.norm(cond_arr), 1e-8)
+            sim = np.dot(new_norm, cond_norm)
+            
+            # Paso 1: Filtro Geométrico
+            if sim > 0.94:
+                # Duplicado casi exacto, podar sin pensar
+                return True
+            
+            if sim < 0.85:
+                # Claramente diferente
+                continue
+            
+            # Paso 2: Zona de Incertidumbre (0.85 - 0.94)
+            # Validar con LLM solo en esta franja
+            if self._eval_duplicate_with_llm(condition, d.get("condition_text", "")):
+                return True
+        
+        return False
+
+
+    def _eval_duplicate_with_llm(self, new_condition: str, existing_condition: str) -> bool:
+        """Validación booleana rápida para zona de incertidumbre."""
         from core.llm import LLMModel
         llm = LLMModel.get_instance()
-        recent = self.active_detectors[-5:]
-        conditions = "\n".join([f"{i+1}. {d.get('condition_text', '')[:120]}" for i, d in enumerate(recent)])
-        prompt = f"""¿Alguno de estos detectores es redundante con este nuevo?
-Nuevo: "{condition[:150]}"
-Existentes:
-{conditions}
-Responde SOLO SI o NO."""
+        
+        prompt = f"""¿Estos dos detectores son FUNCIONALMENTE REDUNDANTES?
+    Nuevo: "{new_condition[:150]}"
+    Existente: "{existing_condition[:150]}"
+    Responde SOLO SI o NO."""
+        
         try:
             return "SI" in llm.generate(prompt, temperature=0.1, max_tokens=3, purpose="verificar_duplicado").upper()
         except Exception:
-            return False
+            return False  # Ante la duda, no podar
 
     # ============================================
     # EVALUACIÓN (CHECK_ALL)

@@ -70,6 +70,7 @@ Sibelium Cognitive Architecture
 - │ └── perception/
 - │ ├── file_analyzer.py # Image (CLIP, BLIP), audio (Whisper), code analysis
 - │ ├── time_perception.py # Temporal context, circadian markers
+- │ ├── deep_reader.py 
 - │ └── user_analysis.py # Empathic resonance, intent & emotion extraction (no keywords)
 - ├── api/
 - │ └── server.py # FastAPI endpoints, SSE streaming, session management

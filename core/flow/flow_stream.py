@@ -72,6 +72,7 @@ class ThoughtItem:
 
 class FlowStream:
     """El río de consciencia de la Entidad."""
+    _embedding_function = None  # Cache compartido entre todas las instancias
 
     def __init__(self, max_active: int = 15):
         self.thoughts: List[ThoughtItem] = []
@@ -220,10 +221,12 @@ class FlowStream:
         return True
 
     def _get_embedding(self, text: str) -> Optional[list]:
+        """Obtiene embedding con caché de la función (no se reinstancia)."""
         try:
-            from chromadb.utils import embedding_functions
-            ef = embedding_functions.DefaultEmbeddingFunction()
-            emb = ef([text])[0]
+            if FlowStream._embedding_function is None:
+                from chromadb.utils import embedding_functions
+                FlowStream._embedding_function = embedding_functions.DefaultEmbeddingFunction()
+            emb = FlowStream._embedding_function([text])[0]
             return list(emb)
         except Exception:
             return None

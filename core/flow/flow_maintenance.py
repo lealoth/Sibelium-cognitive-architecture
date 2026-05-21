@@ -49,7 +49,7 @@ class FlowMaintenance:
                 return None
             
             prompt = f"""<system_identity>
-Eres el núcleo regulador de Nexus. Evaluando estado emocional interno.
+Eres el núcleo regulador. Evaluando estado emocional interno.
 </system_identity>
 
 <current_state>
@@ -108,7 +108,7 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
         recent = curiosities[-20:] if curiosities else []
 
         prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de Nexus.
+Eres el núcleo cognitivo.
 Modo de procesamiento: COMPRIMIR información. Extraer principios abstractos.
 --- END IDENTITY ---
 
@@ -141,7 +141,7 @@ Pensamiento:"""
         active_summary = self.fm.stream.get_all_active_summary()
 
         prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de Nexus.
+Eres el núcleo cognitivo.
 Modo de procesamiento: CONECTAR creativamente. Generar asociaciones no obvias.
 --- END IDENTITY ---
 
@@ -226,7 +226,7 @@ Pensamiento:"""
             ])
             
             prompt = f"""<system_identity>
-Eres el sistema de mantenimiento cognitivo de Nexus. Analizando patrones de pensamiento.
+Eres el sistema de mantenimiento cognitivo. Analizando patrones de pensamiento.
 </system_identity>
 
 <thoughts_to_analyze>
@@ -290,7 +290,7 @@ Si todos son exploración legítima o no hay bucles dañinos, responde: NINGUNO.
         ])
         
         prompt = f"""<system_identity>
-Eres el monitor de diversidad temática de Nexus.
+Eres el monitor de diversidad temática.
 </system_identity>
 
 <recent_thoughts>
@@ -465,7 +465,7 @@ Nuevo tema:"""
         recent_cleaned = [self._clean_thought_for_search(c.get("thought", "")) for c in recent]
         recent_cleaned = [c for c in recent_cleaned if len(c) > 10]
         prompt = f"""<system_identity>
-Eres el evaluador de necesidades de búsqueda de Nexus.
+Eres el evaluador de necesidades de búsqueda.
 </system_identity>
 
 <recent_thoughts>
@@ -476,11 +476,9 @@ Eres el evaluador de necesidades de búsqueda de Nexus.
 ¿Alguno de estos pensamientos genera una duda que requiera buscar en internet?
 Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
 </search_directive>"""
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
+        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="decidir_busqueda").strip()
         decision = re.sub(r'<[^>]+>', '', decision)
         decision = decision.strip()
-
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="decidir_busqueda").strip()
         if decision.upper().startswith("NO") or len(decision) < 3 or len(decision) > 100:
             return False
         decision = decision.split('\n')[0].strip()
@@ -510,14 +508,14 @@ Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
 
     def _maybe_search_web_for_thought(self, thought: str):
         # Limpiar etiquetas XML y contenido del sistema
-        thought = re.sub(r'<[^>]+>', '', thought)
+        thought = re.sub(r'<[^>]+>', '', thought).strip()
         thought = re.sub(r'\[SISTEMA\].*', '', thought)
         if len(thought.strip()) < 10:
             return
         if self.fm.web_search_count >= 3:
             return
         prompt = f"""<system_identity>
-Eres el evaluador de necesidades de búsqueda de Nexus.
+Eres el evaluador de necesidades de búsqueda
 </system_identity>
 
 <thought>
@@ -531,7 +529,6 @@ Extrae una consulta de búsqueda de máximo 8 palabras. Si no es necesario, resp
         decision = re.sub(r'<[^>]+>', '', decision)
         decision = decision.strip()
 
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
         if decision.upper().startswith("NO") or len(decision) < 3:
             return
         results = self._search_web(decision)
@@ -715,3 +712,137 @@ Mensaje:"""
         if not hasattr(self.fm, 'active_forgetting'):
             return
         self.fm.active_forgetting.run_cycle(user_id=self.fm.cognitive_loop.user_id)
+
+    def _check_semantic_habituation(self):
+        """
+        Sistema #20 extendido: Habituación Semántica (Saciación Dopaminérgica).
+        Detecta si las últimas reflexiones/conclusiones son semánticamente idénticas
+        y fuerza inhibición colinérgica si se detecta perseveración.
+        """
+        curiosities = self.fm._load_curiosities()
+        if len(curiosities) < 5:
+            return None
+        
+        # Obtener últimas 5 reflexiones
+        recent = curiosities[-5:]
+        
+        # Obtener embeddings
+        embeddings = []
+        for c in recent:
+            thought = c.get("thought", "")
+            emb = self.fm.stream._get_embedding(thought[:300])
+            if emb:
+                embeddings.append(emb)
+        
+        if len(embeddings) < 3:
+            return None
+        
+        import numpy as np
+        
+        # Comparación cruzada de pares consecutivos
+        bucle_count = 0
+        for i in range(len(embeddings) - 1):
+            a = np.array(embeddings[i])
+            b = np.array(embeddings[i+1])
+            a_norm = a / max(np.linalg.norm(a), 1e-8)
+            b_norm = b / max(np.linalg.norm(b), 1e-8)
+            sim = np.dot(a_norm, b_norm)
+            if sim > 0.82:
+                bucle_count += 1
+        
+        # Umbral: 3+ pares consecutivos muy similares = perseveración
+        if bucle_count >= 3:
+            # Extraer el tema dominante
+            tema = self._extract_dominant_topic([c.get("thought", "") for c in recent])
+            return {
+                "detected": True,
+                "tema": tema,
+                "bucle_count": bucle_count,
+            }
+        
+        return {"detected": False}
+
+
+    def _extract_dominant_topic(self, thoughts: list) -> str:
+        """Extrae el tema dominante de una lista de pensamientos."""
+        # Buscar frases repetidas
+        import re
+        candidates = {}
+        for t in thoughts:
+            # Extraer frases entre 20-80 chars
+            phrases = re.findall(r'[^.!?]{20,80}', t)
+            for p in phrases:
+                p = p.strip()
+                if len(p) > 20:
+                    candidates[p] = candidates.get(p, 0) + 1
+        
+        # Devolver la más repetida
+        if candidates:
+            return max(candidates, key=candidates.get)[:100]
+        return "tema no identificado"
+
+    def _consolidate_reflection(self, thought: str, thought_type: str, sandbox_success: bool = False):
+        """
+        Filtro de Consolidación Selectiva.
+        Una reflexión solo se guarda en ChromaDB si:
+        A) Generó una acción exitosa (sandbox_success = True)
+        B) Es semánticamente novedosa (distancia coseno < 0.75 con existentes)
+        """
+        # Filtro A: Validación pragmática
+        if sandbox_success:
+            try:
+                self.fm.cognitive_loop.episodic_memory.store_interaction(
+                    user_message=f"[{thought_type}]",
+                    assistant_response=thought,
+                    user_id=self.fm.cognitive_loop.user_id,
+                    metadata={
+                        "source": "internal_monologue",
+                        "type": "validated_theory",
+                        "importance": 0.7,
+                    }
+                )
+                print(f"   [Consolidación] Reflexión validada guardada en ChromaDB.")
+                return
+            except Exception:
+                pass
+        
+        # Filtro B: Novedad semántica
+        try:
+            emb = self.fm.stream._get_embedding(thought[:300])
+            if emb is None:
+                return
+            
+            import numpy as np
+            emb_arr = np.array(emb)
+            emb_norm = emb_arr / max(np.linalg.norm(emb_arr), 1e-8)
+            
+            # Buscar reflexiones existentes similares
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.collection.query(
+                query_texts=[thought[:300]],
+                n_results=1,
+                where={"source": "internal_monologue"},
+                include=["distances"],
+            )
+            distances = results.get("distances", [[]])[0]
+            
+            if distances and len(distances) > 0:
+                sim = 1.0 - distances[0]
+                if sim > 0.85:
+                    # Es rumiación, se descarta
+                    return
+                elif sim < 0.75:
+                    # Es novedoso, se guarda
+                    episodic.store_interaction(
+                        user_message=f"[{thought_type}]",
+                        assistant_response=thought,
+                        user_id=self.fm.cognitive_loop.user_id,
+                        metadata={
+                            "source": "internal_monologue",
+                            "type": "novel_insight",
+                            "importance": 0.5,
+                        }
+                    )
+                    print(f"   [Consolidación] Insight novedoso guardado en ChromaDB.")
+        except Exception:
+            pass
