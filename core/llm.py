@@ -161,11 +161,14 @@ class LLMModel:
 
         with LLMModel._lock:
             result = self._generate(prompt, temperature, max_tokens, purpose, backend, t_start)
+            if result is None:
+                result = ""
 
         self._set_cached(prompt, purpose, result)
 
         elapsed = time.time() - t_start
-        self.metrics.record(purpose, backend, len(prompt) // 4, len(result) // 4, elapsed)
+        result_len = len(result) if result else 0
+        self.metrics.record(purpose, backend, len(prompt) // 4, result_len, elapsed)
         # Limpiar etiquetas XML del output
         import re
         result = re.sub(r'<(?!/?query_)[^>]+>', '', result)
@@ -192,9 +195,10 @@ class LLMModel:
             response = self._generate_local(prompt, temperature, max_tokens, "main")
             backend = "main"
         
+        result = response or ""
         elapsed = time.time() - t_start
-        print(f"🤖 [{backend}] {purpose} | {len(response)} chars | {elapsed:.1f}s")
-        return response
+        print(f"🤖 [{backend}] {purpose} | {len(result)} chars | {elapsed:.1f}s")
+        return result
 
     # ============================================
     # GENERACIÓN LOCAL
@@ -202,11 +206,8 @@ class LLMModel:
 
     def _generate_local(self, prompt: str, temperature: float, max_tokens: int, backend: str, purpose: str = "") -> Optional[str]:
         """Usa el modelo local apropiado con sampling avanzado."""
-
         model = self.model_main
-
-
-        # Configuración base
+        
         kwargs = {
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -214,29 +215,28 @@ class LLMModel:
         
         # Min-P + Mirostat para pensamientos creativos
         if purpose in ("simulacion_fondo", "curiosidad_fondo", "prospeccion_fondo", "monologo_unificado"):
-            kwargs["mirostat_mode"] = 2        # Mirostat v2
-            kwargs["mirostat_tau"] = 5.0       # Entropía objetivo
-            kwargs["mirostat_eta"] = 0.1       # Tasa de aprendizaje
-            kwargs["min_p"] = 0.05             # Min-P sampling
-            kwargs["repeat_penalty"] = 1.05    # Penalización suave de repetición
+            kwargs["mirostat_mode"] = 2
+            kwargs["mirostat_tau"] = 5.0
+            kwargs["mirostat_eta"] = 0.1
+            kwargs["min_p"] = 0.05
+            kwargs["repeat_penalty"] = 1.05
         
-        # Min-P sin Mirostat para reflexiones (más estables)
+        # Min-P sin Mirostat para reflexiones
         elif purpose in ("reflexion_fondo", "pensamiento_enriquecido"):
             kwargs["min_p"] = 0.05
             kwargs["repeat_penalty"] = 1.05
         
-        # Respuesta final: solo repeat_penalty (más determinista)
+        # Respuesta final
         elif purpose == "respuesta_final":
             kwargs["repeat_penalty"] = 1.1
-                
-            # Fallback: generación normal
+        
+        try:
             result = model.create_chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 **kwargs
             )
             return result["choices"][0]["message"]["content"]
-
-            # Fallback si Mirostat no está soportado
+        except Exception as e:
             if "mirostat" in str(e).lower():
                 kwargs.pop("mirostat_mode", None)
                 kwargs.pop("mirostat_tau", None)

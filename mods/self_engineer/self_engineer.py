@@ -63,6 +63,7 @@ class SelfEngineer:
         return self.analyze_file(target)
 
     def analyze_file(self, file_path: str) -> Optional[str]:
+        from core.perception.universal_indexer import UniversalIndexer
         indexer = UniversalIndexer(self.flow.cognitive_loop.episodic_memory)
         content = Path(file_path).read_text(encoding='utf-8')
         fragments = indexer.index_file(file_path, content, file_type="code")

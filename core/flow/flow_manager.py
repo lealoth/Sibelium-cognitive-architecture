@@ -569,34 +569,19 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
             rel_path = str(f.relative_to(EXPLORE_DIR))
             if rel_path not in explored:
                 unanalyzed.append(f)
-            else:
-                try:
-                    last_explored = datetime.fromisoformat(explored[rel_path]["timestamp"])
-                    file_modified = datetime.fromtimestamp(f.stat().st_mtime)
-                    if file_modified > last_explored:
-                        unanalyzed.append(f)
-                except:
-                    unanalyzed.append(f)
         
         if unanalyzed:
-            file_to_analyze = self._select_optimal_file(unanalyzed)
+            file_to_analyze = self._select_optimal_file(unanalyzed) if hasattr(self, '_select_optimal_file') else unanalyzed[0]
         else:
-            file_to_analyze = self._select_optimal_file(files)
+            return
         
-        from core.perception.universal_indexer import UniversalIndexer
-
-        # Leer contenido
-        content = file_to_analyze.read_text(encoding='utf-8')
-
-        # Indexar sin LLM
-        indexer = UniversalIndexer(self.cognitive_loop.episodic_memory)
-        fragments = indexer.index_file(
-            file_path=str(file_to_analyze),
-            content=content,
-            file_type="text"
-        )
-
-        print(f"   [Explore] {rel_path} → {fragments} fragmentos indexados en semantic_library")
+        # Una sola llamada. FileAnalyzer ya decide qué hacer según la extensión.
+        from core.perception.file_analyzer import FileAnalyzer
+        result = FileAnalyzer.get_instance().analyze(str(file_to_analyze), llm=None)
+        
+        rel_path = str(file_to_analyze.relative_to(EXPLORE_DIR))
+        self._store_exploration(rel_path, result)
+        print(f"   [Explore] {rel_path}")
     
     # ============================================
     # UTILIDADES

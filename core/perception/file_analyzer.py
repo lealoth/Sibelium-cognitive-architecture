@@ -368,7 +368,7 @@ Escribe en español, en 3-5 oraciones."""
     # TEXTOS Y CÓDIGO
     # ============================================
 
-    def _analyze_text_file(self, path: Path, ext: str, llm=None) -> dict:
+    def _analyze_text_file(self, path: Path, ext: str, llm=None, index_only: bool = False) -> dict:
         """Analiza cualquier archivo de texto, código o PDF. Indexa automáticamente."""
         
         # Leer contenido según tipo
@@ -390,8 +390,11 @@ Escribe en español, en 3-5 oraciones."""
                 except Exception as e:
                     return {"type": "error", "content": f"Error: {e}"}
 
-        # Indexar universalmente
-        self._index_content(str(path), content, ext)
+        # Indexar universalmente (siempre)
+        fragments = self._index_content(str(path), content, ext)
+
+        if index_only:
+            return {"type": "indexed", "file": path.name, "fragments": fragments}
 
         lines = content.split('\n')
         result = {
@@ -410,6 +413,24 @@ Escribe en español, en 3-5 oraciones."""
             result["structure"] = {"classes": classes, "functions": functions[:20], "imports": imports}
 
         return result
+
+    def _index_content(self, file_path: str, content: str, ext: str) -> int:
+        """Indexa contenido. Devuelve número de fragmentos."""
+        try:
+            from core.perception.universal_indexer import UniversalIndexer
+            from core.memory.episodic_memory import EpisodicMemory
+            
+            file_type = "code" if ext in ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', '.css', '.html'] else "text"
+            
+            em = EpisodicMemory()
+            indexer = UniversalIndexer(em)
+            fragments = indexer.index_file(file_path, content, file_type)
+            if fragments > 0:
+                print(f"   [FileAnalyzer] Indexado: {file_path} → {fragments} fragmentos")
+            return fragments
+        except Exception as e:
+            print(f"   [!] Error indexando {file_path}: {e}")
+            return 0
 
     # ============================================
     # GRANULARIDAD

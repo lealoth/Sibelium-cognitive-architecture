@@ -37,25 +37,37 @@ class UniversalIndexer:
 
     def _index_code(self, file_path: str, content: str) -> int:
         """Indexa código en procedural_index."""
+        # Borrar fragmentos existentes de este archivo antes de re-indexar
+        try:
+            existing = self.em.procedural_collection.get(
+                where={"file": file_path},
+                include=["ids"]
+            )
+            if existing.get("ids"):
+                self.em.procedural_collection.delete(ids=existing["ids"])
+        except Exception:
+            pass
+
         chunks = self.chunker.chunk_semantic(content, content_type="code")
         base_id = Path(file_path).stem
         
         count = 0
         for chunk in chunks:
+            clean_meta = self._sanitize_metadata({
+                "file": file_path,
+                "section": chunk.get("section", ""),
+                "fragment_id": chunk.get("fragment_id", ""),
+                "fragment_index": chunk.get("fragment_index", 0),
+                "total_fragments": chunk.get("total_fragments", 0),
+                "prev_fragment_id": chunk.get("prev_fragment_id", ""),
+                "next_fragment_id": chunk.get("next_fragment_id", ""),
+                "type": "code_fragment",
+                "importance": 0.6,
+            })
             self.em.procedural_collection.add(
                 documents=[chunk["text"]],
-                metadatas=[{
-                    "file": file_path,
-                    "section": chunk.get("section", ""),
-                    "fragment_id": chunk["fragment_id"],
-                    "fragment_index": chunk["fragment_index"],
-                    "total_fragments": chunk["total_fragments"],
-                    "prev_fragment_id": chunk.get("prev_fragment_id", ""),
-                    "next_fragment_id": chunk.get("next_fragment_id", ""),
-                    "type": "code_fragment",
-                    "importance": 0.6,
-                }],
-                ids=[f"{base_id}_{chunk['fragment_id']}"],
+                metadatas=[clean_meta],
+                ids=[f"{base_id}_{chunk.get('fragment_id', count)}"],
             )
             count += 1
         
@@ -63,31 +75,55 @@ class UniversalIndexer:
 
     def _index_document(self, file_path: str, content: str) -> int:
         """Indexa documento en semantic_library."""
+        # Borrar fragmentos existentes de este archivo antes de re-indexar
+        try:
+            existing = self.em.semantic_collection.get(
+                where={"filename": file_path},
+                include=["ids"]
+            )
+            if existing.get("ids"):
+                self.em.semantic_collection.delete(ids=existing["ids"])
+        except Exception:
+            pass
+
         chunks = self.chunker.chunk_semantic(content, content_type="markdown")
         base_id = Path(file_path).stem
         
         count = 0
         for chunk in chunks:
+            clean_meta = self._sanitize_metadata({
+                "source": "nexus_world",
+                "filename": file_path,
+                "section": chunk.get("section", ""),
+                "fragment_id": chunk.get("fragment_id", ""),
+                "fragment_index": chunk.get("fragment_index", 0),
+                "total_fragments": chunk.get("total_fragments", 0),
+                "prev_fragment_id": chunk.get("prev_fragment_id", ""),
+                "next_fragment_id": chunk.get("next_fragment_id", ""),
+                "type": "empirical_fact",
+                "confidence_score": 1.0,
+                "importance": 0.7,
+            })
             self.em.semantic_collection.add(
                 documents=[chunk["text"]],
-                metadatas=[{
-                    "source": "nexus_world",
-                    "filename": file_path,
-                    "section": chunk.get("section", ""),
-                    "fragment_id": chunk["fragment_id"],
-                    "fragment_index": chunk["fragment_index"],
-                    "total_fragments": chunk["total_fragments"],
-                    "prev_fragment_id": chunk.get("prev_fragment_id", ""),
-                    "next_fragment_id": chunk.get("next_fragment_id", ""),
-                    "type": "empirical_fact",
-                    "confidence_score": 1.0,
-                    "importance": 0.7,
-                }],
-                ids=[f"{base_id}_{chunk['fragment_id']}"],
+                metadatas=[clean_meta],
+                ids=[f"{base_id}_{chunk.get('fragment_id', count)}"],
             )
             count += 1
         
         return count
+
+    def _sanitize_metadata(self, meta: dict) -> dict:
+        """Asegura que todos los valores sean strings, números o booleanos para ChromaDB."""
+        clean = {}
+        for key, value in meta.items():
+            if value is None:
+                clean[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
+                clean[key] = value
+            else:
+                clean[key] = str(value)
+        return clean
 
     def index_all_in_folder(self, folder_path: str, file_type: str = "auto") -> dict:
         """Indexa todos los archivos de una carpeta."""
