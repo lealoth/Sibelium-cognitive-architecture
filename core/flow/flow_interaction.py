@@ -224,16 +224,59 @@ class FlowInteraction:
         except Exception:
             confidence = 0.5
 
-        if confidence < 0.45:
+        # Anclas de intención puras (verbos universales, sin dominio)
+        opt_anchor = self.fm.stream._get_embedding(
+            "optimize improve fix solve reduce enhance configure update upgrade accelerate"
+        )
+        insp_anchor = self.fm.stream._get_embedding(
+            "explain describe how does work what is list show find query analyze"
+        )
+
+        # Vector de dominio (top 10 keywords del DomainFilter)
+        domain_keywords = self.fm.domain_filter.get_keywords()[:10] if hasattr(self.fm, 'domain_filter') else []
+        domain_str = " ".join(domain_keywords) if domain_keywords else ""
+        domain_anchor = self.fm.stream._get_embedding(domain_str) if domain_str else None
+
+        if opt_anchor and insp_anchor:
+            msg_emb = self.fm.stream._get_embedding(message)
+            msg_arr = np.array(msg_emb)
+            msg_arr = msg_arr / np.linalg.norm(msg_arr)
+            
+            opt_arr = np.array(opt_anchor) / np.linalg.norm(opt_anchor)
+            insp_arr = np.array(insp_anchor) / np.linalg.norm(insp_anchor)
+            
+            sim_opt = float(np.dot(msg_arr, opt_arr))
+            sim_insp = float(np.dot(msg_arr, insp_arr))
+            
+            is_optimization_intent = (sim_opt > sim_insp) and (sim_opt > 0.38)
+            
+            if domain_anchor is not None:
+                domain_arr = np.array(domain_anchor) / np.linalg.norm(domain_anchor)
+                sim_domain = float(np.dot(msg_arr, domain_arr))
+                in_domain = sim_domain > 0.45
+            else:
+                in_domain = True  # Sin dominio definido, asumir que todo aplica
+            
+            force_web_search = is_optimization_intent and in_domain
+        else:
+            force_web_search = False
+
+        # Decisión final de búsqueda web
+        if confidence < 0.45 or force_web_search:
             web_context = self._fetch_web_context(message)
             if web_context:
-                prompt += f"""--- WEB CONTEXT (auto-searched) ---
+                prompt += f"""--- EXTERNAL KNOWLEDGE (web search) ---
         {web_context}
-        --- END WEB CONTEXT ---
+        --- END EXTERNAL KNOWLEDGE ---
+
+        --- DIRECTIVE ---
+        Compare your internal memory with the external knowledge above.
+        If your internal memory only describes the current state but does not contain
+        the solution, base your answer on the external knowledge.
         """
-            else:
+            elif confidence < 0.45:
                 prompt += f"""--- EPISTEMIC BOUNDARY ---
-        WARNING: No reliable records or web results for this query. State your uncertainty.
+        WARNING: No reliable records or web results. State your uncertainty.
         --- END EPISTEMIC BOUNDARY ---
         """
 
@@ -276,9 +319,18 @@ class FlowInteraction:
         return "\n".join(errors) if errors else ""
 
     def _fetch_web_context(self, query: str) -> str:
+        # Añadir contexto del dominio para desambiguar
+        domain_context = ""
+        if hasattr(self.fm, 'domain_filter'):
+            keywords = self.fm.domain_filter.get_keywords()[:5]
+            if keywords:
+                domain_context = " ".join(keywords)
+        
+        search_query = f"{query} {domain_context}" if domain_context else query
+        
         try:
             from ddgs import DDGS
-            results = DDGS().text(query[:200], max_results=3)
+            results = DDGS().text(search_query[:200], max_results=3)
             if results:
                 snippets = []
                 for r in results:
@@ -286,9 +338,9 @@ class FlowInteraction:
                     if body:
                         snippets.append(body)
                 result = "\n".join(snippets) if snippets else ""
-                print(f"   [WebContext] Buscado: '{query[:60]}...' → {len(snippets)} snippets")
+                print(f"   [WebContext] Buscado: '{search_query[:60]}...' → {len(snippets)} snippets")
                 return result
-            print(f"   [WebContext] Buscado: '{query[:60]}...' → SIN RESULTADOS")
+            print(f"   [WebContext] Buscado: '{search_query[:60]}...' → SIN RESULTADOS")
         except Exception as e:
             print(f"   [WebContext] Error: {e}")
         return ""

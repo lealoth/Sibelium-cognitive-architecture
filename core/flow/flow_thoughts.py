@@ -4,6 +4,7 @@ from core.flow.flow_stream import ThoughtItem
 from core.llm import LLMModel
 from config import IDIOMA
 from core.flow.temperature_optimizer import calcular_temperatura
+import numpy as np
 
 class FlowThoughts:
     """Módulo de pensamientos: reflexión, curiosidad, simulación, enriquecimiento."""
@@ -99,9 +100,53 @@ Pensamiento:"""
         except Exception:
             confidence = 0.5
 
-        # Frontera Epistémica: detectar vacíos de conocimiento
-        if replay_context and confidence < 0.45:
-            web_context = self._fetch_web_for_thought(active_summary[:200])
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
+
+        # Misma lógica de intención + dominio usando active_summary como mensaje
+        opt_anchor = self.fm.stream._get_embedding(
+            "optimize improve fix solve reduce enhance configure update upgrade accelerate"
+        )
+        insp_anchor = self.fm.stream._get_embedding(
+            "explain describe how does work what is list show find query analyze"
+        )
+
+        domain_keywords = self.fm.domain_filter.get_keywords()[:10] if hasattr(self.fm, 'domain_filter') else []
+        domain_str = " ".join(domain_keywords) if domain_keywords else ""
+        domain_anchor = self.fm.stream._get_embedding(domain_str) if domain_str else None
+
+        query_text = active_summary[:300] if active_summary else replay_context[:300]
+
+        if opt_anchor and insp_anchor:
+            query_emb = self.fm.stream._get_embedding(query_text)
+            query_arr = np.array(query_emb) / np.linalg.norm(query_emb)
+            
+            opt_arr = np.array(opt_anchor) / np.linalg.norm(opt_anchor)
+            insp_arr = np.array(insp_anchor) / np.linalg.norm(insp_anchor)
+            
+            sim_opt = float(np.dot(query_arr, opt_arr))
+            sim_insp = float(np.dot(query_arr, insp_arr))
+            
+            is_optimization_intent = (sim_opt > sim_insp) and (sim_opt > 0.38)
+            
+            if domain_anchor is not None:
+                domain_arr = np.array(domain_anchor) / np.linalg.norm(domain_anchor)
+                sim_domain = float(np.dot(query_arr, domain_arr))
+                in_domain = sim_domain > 0.45
+            else:
+                in_domain = True
+            
+            force_web_search = is_optimization_intent and in_domain
+        else:
+            force_web_search = False
+
+        # Decisión final
+        if confidence < 0.45 or force_web_search:
+            web_context = self._fetch_web_for_thought(query_text)
             if web_context:
                 replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
 
@@ -157,9 +202,53 @@ Pensamiento:"""
         except Exception:
             confidence = 0.5
 
-        # Frontera Epistémica: detectar vacíos de conocimiento
-        if replay_context and confidence < 0.45:
-            web_context = self._fetch_web_for_thought(active_summary[:200])
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
+
+        # Misma lógica de intención + dominio usando active_summary como mensaje
+        opt_anchor = self.fm.stream._get_embedding(
+            "optimize improve fix solve reduce enhance configure update upgrade accelerate"
+        )
+        insp_anchor = self.fm.stream._get_embedding(
+            "explain describe how does work what is list show find query analyze"
+        )
+
+        domain_keywords = self.fm.domain_filter.get_keywords()[:10] if hasattr(self.fm, 'domain_filter') else []
+        domain_str = " ".join(domain_keywords) if domain_keywords else ""
+        domain_anchor = self.fm.stream._get_embedding(domain_str) if domain_str else None
+
+        query_text = active_summary[:300] if active_summary else replay_context[:300]
+
+        if opt_anchor and insp_anchor:
+            query_emb = self.fm.stream._get_embedding(query_text)
+            query_arr = np.array(query_emb) / np.linalg.norm(query_emb)
+            
+            opt_arr = np.array(opt_anchor) / np.linalg.norm(opt_anchor)
+            insp_arr = np.array(insp_anchor) / np.linalg.norm(insp_anchor)
+            
+            sim_opt = float(np.dot(query_arr, opt_arr))
+            sim_insp = float(np.dot(query_arr, insp_arr))
+            
+            is_optimization_intent = (sim_opt > sim_insp) and (sim_opt > 0.38)
+            
+            if domain_anchor is not None:
+                domain_arr = np.array(domain_anchor) / np.linalg.norm(domain_anchor)
+                sim_domain = float(np.dot(query_arr, domain_arr))
+                in_domain = sim_domain > 0.45
+            else:
+                in_domain = True
+            
+            force_web_search = is_optimization_intent and in_domain
+        else:
+            force_web_search = False
+
+        # Decisión final
+        if confidence < 0.45 or force_web_search:
+            web_context = self._fetch_web_for_thought(query_text)
             if web_context:
                 replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
 
@@ -204,10 +293,18 @@ Pensamiento:"""
         self.fm._store_curiosity(enriched_thought)
     
     def _fetch_web_for_thought(self, query: str) -> str:
-        """Busca en web para pensamientos de fondo."""
+        # Añadir contexto del dominio para desambiguar
+        domain_context = ""
+        if hasattr(self.fm, 'domain_filter'):
+            keywords = self.fm.domain_filter.get_keywords()[:5]
+            if keywords:
+                domain_context = " ".join(keywords)
+        
+        search_query = f"{query} {domain_context}" if domain_context else query
+        
         try:
             from ddgs import DDGS
-            results = DDGS().text(query[:200], max_results=2)
+            results = DDGS().text(search_query[:300], max_results=2)
             if results:
                 snippets = [r.get("body", "")[:300] for r in results if r.get("body")]
                 return "\n".join(snippets) if snippets else ""
