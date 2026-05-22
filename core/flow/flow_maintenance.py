@@ -49,7 +49,7 @@ class FlowMaintenance:
                 return None
             
             prompt = f"""<system_identity>
-Eres el núcleo regulador de Nexus. Evaluando estado emocional interno.
+Eres el núcleo regulador. Evaluando estado emocional interno.
 </system_identity>
 
 <current_state>
@@ -78,6 +78,87 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
     # CONSOLIDACIÓN
     # ============================================
     
+    def _run_immune_check(self):
+        now = datetime.now()
+        if self.fm._last_immune_check and (now - self.fm._last_immune_check).total_seconds() < 300:
+            return
+        self.fm._last_immune_check = now
+
+        # Determinar estado (idle vs interacción)
+        is_idle = (
+            self.fm.last_message_time is None
+            or (datetime.now() - self.fm.last_message_time).total_seconds() > 120
+        )
+        state = "IDLE" if is_idle else "INTERACCION"
+
+        # Calcular umbral adaptativo por rol y expresividad
+        persona = self.fm.cognitive_loop.load_persona()
+        threshold = self._calculate_immune_threshold(persona, state)
+
+        recent_responses = [
+            entry.get("text", "") for entry in self.fm.cognitive_loop.last_history[-5:]
+            if entry.get("role") == "assistant"
+        ]
+        if len(recent_responses) < 2:
+            return
+
+        base_personality = self._get_personality_vector()
+        if base_personality is None:
+            return
+
+        import numpy as np
+        response_text = " ".join(recent_responses)[:500]
+        response_emb = self.fm.stream._get_embedding(response_text)
+        if response_emb is None:
+            return
+
+        response_arr = np.array(response_emb)
+        response_norm = response_arr / max(np.linalg.norm(response_arr), 1e-8)
+        base_arr = np.array(base_personality)
+        base_norm = base_arr / max(np.linalg.norm(base_arr), 1e-8)
+        distance = 1.0 - float(np.dot(response_norm, base_norm))
+        print(f"   [Inmune] Dist: {distance:.2f}, Umbral: {threshold:.2f}, State: {state}, Role: {persona.get('role_type', '?')}")
+        if distance > threshold:
+            print(f"   [Inmune] ⚠️ Deriva detectada (dist: {distance:.2f}, umbral: {threshold:.2f}). Restaurando...")
+            self._inject_immune_response(distance)
+
+    def _calculate_immune_threshold(self, persona: dict, state: str = "INTERACCION") -> float:
+        """
+        Umbral Inmune Adaptativo por Plasticidad y Rol.
+        
+        Fórmula: τ = τ_base + Δ_max × (1 - ε) × γ
+        
+        - ε (expressiveness_base): A menor expresividad, más tolerancia (dominio técnico)
+        - γ (gamma): Factor de privilegio inmune según role_type
+        - state: "IDLE" o "INTERACCION" (diferentes bases)
+        """
+        # 1. Bases según estado
+        if state == "IDLE":
+            base_threshold = 0.70
+            max_delta = 0.20
+        else:
+            base_threshold = 0.45
+            max_delta = 0.25
+        
+        # 2. Parámetros de la entidad
+        traits = persona.get("traits", {})
+        expressiveness = traits.get("expressiveness_base", 0.5)
+        role_type = persona.get("role_type", "conversational")
+        
+        # 3. Matriz de Privilegio Inmune (gamma)
+        role_privilege = {
+            "conversational": 0.1,
+            "experimental": 0.5,
+            "data_analyst": 0.8,
+            "self_engineer": 1.0,
+        }
+        gamma = role_privilege.get(role_type, 0.3)
+        
+        # 4. Umbral adaptativo
+        threshold = base_threshold + (max_delta * (1.0 - expressiveness) * gamma)
+        
+        return round(threshold, 3)
+
     def _consolidate_memories(self):
         if self.fm.last_message_time:
             elapsed = (datetime.now() - self.fm.last_message_time).total_seconds()
@@ -102,74 +183,143 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
 
 
     def _consolidate_nrem(self):
-        """Fase NREM: Extrae principios abstractos, descarta detalles."""
+        """Fase NREM con clustering geométrico previo al LLM."""
         active_summary = self.fm.stream.get_all_active_summary()
         curiosities = self.fm._load_curiosities()
         recent = curiosities[-20:] if curiosities else []
 
-        prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de Nexus.
-Modo de procesamiento: COMPRIMIR información. Extraer principios abstractos.
---- END IDENTITY ---
+        # Fase geométrica: agrupar fragmentos indexados por densidad vectorial
+        clustered_knowledge = self._cluster_indexed_knowledge()
+        
+        sleep_focus = self.fm.archetype.get("sleep_focus", "General cognitive consolidation.")
+        domain_keywords = ", ".join(self.fm.domain_filter.get_keywords()[:15]) if hasattr(self.fm, 'domain_filter') else ""
 
---- ACTIVE THOUGHTS ---
-{active_summary}
---- END ACTIVE ---
+        prompt = f"""--- NREM CONSOLIDATION ---
+        [ACTIVE THOUGHTS]: {active_summary}
+        [COGNITIVE FOCUS]: {sleep_focus}
+        [DOMAIN KEYWORDS]: {domain_keywords}
+    [RECENT REFLECTIONS]: {', '.join([c.get('thought', '')[:80] for c in recent[-5:]]) if recent else 'None'}
+    [CLUSTERED KNOWLEDGE (grouped by semantic density)]:
+    {clustered_knowledge[:1500] if clustered_knowledge else 'No clusters formed'}
 
---- RECENT THOUGHTS ---
-{', '.join([c.get('thought', '')[:80] for c in recent[-5:]]) if recent else 'Ninguno'}
---- END RECENT ---
+    Extract 1-2 abstract principles from each cluster.
+    Respond in {IDIOMA}."""
+        
+        consolidation = self.fm.llm.generate(prompt, temperature=0.3, max_tokens=200, purpose="consolidacion")
+        if consolidation:
+            self.fm.stream.add_thought(ThoughtItem(
+                content=f"[NREM] {consolidation}",
+                thought_type="consolidation", priority=0.8, source="internal"
+            ))
 
---- DIRECTIVE ---
-Extrae 1-2 principios generales o patrones de la informacion disponible.
-Descarta detalles especificos. Solo conserva la estructura abstracta.
-Responde en 1-2 frases en {IDIOMA}.
---- END DIRECTIVE ---
 
-Pensamiento:"""
-
-        consolidation = self.fm.llm.generate(prompt, temperature=0.3, max_tokens=150, purpose="consolidacion")
-        self.fm.stream.add_thought(ThoughtItem(
-            content=f"[NREM] {consolidation}",
-            thought_type="consolidation", priority=0.8, source="internal"
-        ))
-        self.fm._store_curiosity(f"[NREM] {consolidation}")
-
+    def _cluster_indexed_knowledge(self) -> str:
+        """Agrupa fragmentos de semantic_library por densidad vectorial."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            # Obtener fragmentos recientes
+            results = episodic.query_semantic(
+                self.fm.stream.get_all_active_summary()[:300],
+                n_results=15
+            )
+            if len(results) < 3:
+                return ""
+            
+            # Obtener embeddings de los fragmentos
+            embeddings = []
+            texts = []
+            for r in results:
+                emb = self.fm.stream._get_embedding(r["content"][:500])
+                if emb:
+                    embeddings.append(emb)
+                    texts.append(r["content"][:300])
+            
+            if len(embeddings) < 3:
+                return ""
+            
+            import numpy as np
+            emb_array = np.array(embeddings)
+            
+            # Clustering simple por distancia coseno (fallback sin UMAP/HDBSCAN)
+            from sklearn.cluster import DBSCAN
+            clustering = DBSCAN(eps=0.3, min_samples=2, metric='cosine').fit(emb_array)
+            labels = clustering.labels_
+            
+            clusters = {}
+            for i, label in enumerate(labels):
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(texts[i])
+            
+            # Formatear clusters para el prompt
+            output = []
+            for label, cluster_texts in clusters.items():
+                if label == -1:
+                    continue  # Ruido
+                output.append(f"Cluster {label} ({len(cluster_texts)} fragments):\n" + 
+                            "\n".join([f"- {t[:200]}" for t in cluster_texts[:3]]))
+            
+            return "\n\n".join(output) if output else ""
+        except Exception as e:
+            print(f"   [!] Error en clustering: {e}")
+            return ""
 
     def _consolidate_rem(self):
-        """Fase REM: Reorganizacion creativa, conexiones no obvias, olvido activo."""
+        """Fase REM: Genera simulaciones especulativas sobre conocimiento indexado."""
         active_summary = self.fm.stream.get_all_active_summary()
 
-        prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de Nexus.
-Modo de procesamiento: CONECTAR creativamente. Generar asociaciones no obvias.
---- END IDENTITY ---
+        # Elegir un archivo indexado para simular
+        indexed_file = ""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            # Buscar un fragmento aleatorio de procedural_index para simular sobre él
+            results = episodic.query_procedural(active_summary[:300], n_results=3)
+            if results:
+                indexed_file = results[0].get("file", "") + ": " + results[0].get("code", "")[:500]
+        except Exception:
+            pass
 
---- ACTIVE THOUGHTS ---
-{active_summary}
---- END ACTIVE ---
+        sleep_focus = self.fm.archetype.get("sleep_focus", "General cognitive consolidation.")
+        domain_keywords = ", ".join(self.fm.domain_filter.get_keywords()[:15]) if hasattr(self.fm, 'domain_filter') else ""
 
---- DIRECTIVE ---
-Identifica conexiones entre conceptos no relacionados de la informacion disponible.
-Genera un escenario contrafactual breve basado en patrones detectados.
-Responde en 1-2 frases en {IDIOMA}.
---- END DIRECTIVE ---
+        prompt = f"""--- NREM CONSOLIDATION ---
+        [ACTIVE THOUGHTS]: {active_summary}
+        [COGNITIVE FOCUS]: {sleep_focus}
+        [DOMAIN KEYWORDS]: {domain_keywords}
+    [CODE TO ANALYZE]: {indexed_file[:1000] if indexed_file else 'No indexed code available'}
 
-Pensamiento:"""
+    Generate a speculative analysis. Imagine a user might ask about a bug or optimization in this code.
+    What would you identify as potential issues? What solutions would you propose?
+    Respond in 2-3 sentences in {IDIOMA}. Be specific and technical."""
+        
+        consolidation = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=200, purpose="consolidacion")
+        if consolidation:
+            self.fm.stream.add_thought(ThoughtItem(
+                content=f"[REM] {consolidation}",
+                thought_type="consolidation", priority=0.8, source="internal"
+            ))
+            self.fm._store_curiosity(f"[REM] {consolidation}")
+            
+            # Guardar como speculative_insight en episodic_memory
+            try:
+                self.fm.cognitive_loop.episodic_memory.store_interaction(
+                    user_message="[Speculative analysis]",
+                    assistant_response=consolidation,
+                    user_id=self.fm.cognitive_loop.user_id,
+                    metadata={
+                        "source": "internal_monologue",
+                        "type": "speculative_insight",
+                        "importance": 0.5,
+                    }
+                )
+            except Exception:
+                pass
 
-        consolidation = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="consolidacion")
-        self.fm.stream.add_thought(ThoughtItem(
-            content=f"[REM] {consolidation}",
-            thought_type="consolidation", priority=0.8, source="internal"
-        ))
-        self.fm._store_curiosity(f"[REM] {consolidation}")
-
+        # Consolidar Yo Narrativo
         episodios = self.fm._load_curiosities()[-10:]
         episodios_text = [c.get("thought", "") for c in episodios]
-        self.fm.cognitive_loop.self_memory.consolidate_yo_narrativo(
-            self.fm.llm, episodios_text
-        )
-
+        self.fm.cognitive_loop.self_memory.consolidate_yo_narrativo(self.fm.llm, episodios_text)
+        
         self._active_forgetting()
 
 
@@ -226,7 +376,7 @@ Pensamiento:"""
             ])
             
             prompt = f"""<system_identity>
-Eres el sistema de mantenimiento cognitivo de Nexus. Analizando patrones de pensamiento.
+Eres el sistema de mantenimiento cognitivo. Analizando patrones de pensamiento.
 </system_identity>
 
 <thoughts_to_analyze>
@@ -290,7 +440,7 @@ Si todos son exploración legítima o no hay bucles dañinos, responde: NINGUNO.
         ])
         
         prompt = f"""<system_identity>
-Eres el monitor de diversidad temática de Nexus.
+Eres el monitor de diversidad temática.
 </system_identity>
 
 <recent_thoughts>
@@ -447,52 +597,6 @@ Nuevo tema:"""
             return " | ".join([r["body"] for r in results]) if results else ""
         except Exception:
             return ""
-    
-    def _maybe_search_web(self):
-        if (datetime.now() - self.fm.web_search_reset).total_seconds() > 3600:
-            self.fm.web_search_count = 0
-            self.fm.web_search_reset = datetime.now()
-        if self.fm.web_search_count >= 3:
-            return False
-        
-        curiosities = self.fm._load_curiosities()
-        if not curiosities:
-            return False
-        
-        recent = curiosities[-5:]  # ← Primero definir
-        
-        # Luego limpiar
-        recent_cleaned = [self._clean_thought_for_search(c.get("thought", "")) for c in recent]
-        recent_cleaned = [c for c in recent_cleaned if len(c) > 10]
-        prompt = f"""<system_identity>
-Eres el evaluador de necesidades de búsqueda de Nexus.
-</system_identity>
-
-<recent_thoughts>
-{chr(10).join([f'- {c.get("thought", "")}' for c in recent])}
-</recent_thoughts>
-
-<search_directive>
-¿Alguno de estos pensamientos genera una duda que requiera buscar en internet?
-Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
-</search_directive>"""
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
-        decision = re.sub(r'<[^>]+>', '', decision)
-        decision = decision.strip()
-
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="decidir_busqueda").strip()
-        if decision.upper().startswith("NO") or len(decision) < 3 or len(decision) > 100:
-            return False
-        decision = decision.split('\n')[0].strip()
-        results = self._search_web(decision)
-        if results:
-            self.fm.web_search_count += 1
-            self.fm.stream.add_thought(ThoughtItem(content=f"Busqué '{decision}' en internet y aprendí algo nuevo.", thought_type="web_search", priority=0.5, source="web"))
-            self.fm._store_curiosity(f"[Busqueda: {decision}] {results}")
-            self.fm.last_thought_time = datetime.now()
-            print(f"   [Web] ¡Busqueda realizada! {decision}")
-            return True
-        return False
 
     def _clean_thought_for_search(self, thought: str) -> str:
         """Elimina etiquetas XML y contenido del sistema de los pensamientos."""
@@ -507,40 +611,6 @@ Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
         thought = re.sub(r'---\s*\w+\s*---', '', thought)
         thought = re.sub(r'\[SISTEMA\].*', '', thought)
         return thought.strip()
-
-    def _maybe_search_web_for_thought(self, thought: str):
-        # Limpiar etiquetas XML y contenido del sistema
-        thought = re.sub(r'<[^>]+>', '', thought)
-        thought = re.sub(r'\[SISTEMA\].*', '', thought)
-        if len(thought.strip()) < 10:
-            return
-        if self.fm.web_search_count >= 3:
-            return
-        prompt = f"""<system_identity>
-Eres el evaluador de necesidades de búsqueda de Nexus.
-</system_identity>
-
-<thought>
-Un pensamiento generó esta duda: "{thought}"
-</thought>
-
-<search_directive>
-Extrae una consulta de búsqueda de máximo 8 palabras. Si no es necesario, responde NO.
-</search_directive>"""
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
-        decision = re.sub(r'<[^>]+>', '', decision)
-        decision = decision.strip()
-
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
-        if decision.upper().startswith("NO") or len(decision) < 3:
-            return
-        results = self._search_web(decision)
-        if results:
-            self.fm.web_search_count += 1
-            self.fm.stream.add_thought(ThoughtItem(content=f"Busqué '{decision}' y aprendí: {results}", thought_type="web_search", priority=0.5, source="web"))
-            self.fm._store_curiosity(f"[Busqueda desde pensamiento: {decision}] {results}")
-            self.fm.last_thought_time = datetime.now()
-            print(f"   [Web] Búsqueda desde pensamiento: {decision}")
     
     # ============================================
     # PREDICCIÓN
@@ -634,47 +704,6 @@ Mensaje:"""
         except Exception as e:
             print(f"   [!] Error en mensaje proactivo: {e}")
 
-    def _run_immune_check(self):
-        """Sistema Inmune Lógico: detecta deriva de personalidad cada 5 minutos."""
-        now = datetime.now()
-        if not hasattr(self.fm, '_last_immune_check'):
-            self.fm._last_immune_check = None
-        if self.fm._last_immune_check and (now - self.fm._last_immune_check).total_seconds() < 300:
-            return
-        self.fm._last_immune_check = now
-
-        # Obtener últimas respuestas del historial
-        recent_responses = [
-            entry.get("text", "") for entry in self.fm.cognitive_loop.last_history[-5:]
-            if entry.get("role") == "assistant"
-        ]
-        if len(recent_responses) < 2:
-            return
-
-        # Vector de personalidad base (desde persona.json)
-        base_personality = self._get_personality_vector()
-        if base_personality is None:
-            return
-
-        # Vector de respuestas recientes
-        import numpy as np
-        response_text = " ".join(recent_responses)[:500]
-        response_emb = self.fm.stream._get_embedding(response_text)
-        if response_emb is None:
-            return
-
-        # Calcular distancia coseno entre personalidad base y respuestas recientes
-        response_arr = np.array(response_emb)
-        response_norm = response_arr / max(np.linalg.norm(response_arr), 1e-8)
-        base_arr = np.array(base_personality)
-        base_norm = base_arr / max(np.linalg.norm(base_arr), 1e-8)
-        distance = 1.0 - float(np.dot(response_norm, base_norm))
-
-        # Si la distancia es > 0.5, hay deriva de personalidad
-        if distance > 0.5:
-            print(f"   [Inmune] ⚠️ Deriva de personalidad detectada (distancia: {distance:.2f}). Restaurando...")
-            self._inject_immune_response(distance)
-
     def _get_personality_vector(self) -> list:
         """Obtiene el vector de personalidad base desde persona.json."""
         try:
@@ -689,29 +718,160 @@ Mensaje:"""
             return None
 
     def _inject_immune_response(self, distance: float):
-        """Inyecta alerta neuroquímica para restaurar personalidad."""
+        """Inyecta restauración de identidad y limpia el contexto idle."""
         from core.flow.flow_stream import ThoughtItem
-
-        # Reducir prioridad de pensamientos que causaron la deriva
-        for t in self.fm.stream.active:
-            t.priority *= 0.4
-
-        # Inyectar pensamiento de restauración de identidad
+        
         self.fm.stream.add_thought(ThoughtItem(
-            content=f"[Alerta Inmune] Deriva de personalidad detectada ({distance:.2f}). "
-                    f"Restaurando directrices de identidad originales.",
-            thought_type="immune_response",
-            priority=0.95,
-            source="immune_system"
+            content=f"[Sistema Inmune] Deriva de personalidad corregida (distancia: {distance:.2f})",
+            thought_type="immune_restore",
+            priority=0.9,
+            source="system"
         ))
-
-        # Restaurar reglas de pensamiento originales
-        self.fm._store_curiosity(
-            f"[Sistema Inmune] Deriva de personalidad corregida (distancia: {distance:.2f})"
-        )
+        
+        # Solución B: Limpiar reflexiones idle del stream para romper el bucle
+        self.fm.stream.thoughts = [
+            t for t in self.fm.stream.thoughts
+            if t.source not in ("internal", "pattern_detector", "pattern_detector_event")
+            or t.type in ("user_interaction", "post_interaction", "wake")
+        ]
+        self.fm.stream._update_active()
 
     def _active_forgetting(self):
         """Olvido activo: elimina pensamientos con fuerza sináptica < 0.05."""
         if not hasattr(self.fm, 'active_forgetting'):
             return
         self.fm.active_forgetting.run_cycle(user_id=self.fm.cognitive_loop.user_id)
+
+    def _check_semantic_habituation(self):
+        """
+        Sistema #20 extendido: Habituación Semántica (Saciación Dopaminérgica).
+        Detecta si las últimas reflexiones/conclusiones son semánticamente idénticas
+        y fuerza inhibición colinérgica si se detecta perseveración.
+        """
+        curiosities = self.fm._load_curiosities()
+        if len(curiosities) < 5:
+            return None
+        
+        # Obtener últimas 5 reflexiones
+        recent = curiosities[-5:]
+        
+        # Obtener embeddings
+        embeddings = []
+        for c in recent:
+            thought = c.get("thought", "")
+            emb = self.fm.stream._get_embedding(thought[:300])
+            if emb:
+                embeddings.append(emb)
+        
+        if len(embeddings) < 3:
+            return None
+        
+        import numpy as np
+        
+        # Comparación cruzada de pares consecutivos
+        bucle_count = 0
+        for i in range(len(embeddings) - 1):
+            a = np.array(embeddings[i])
+            b = np.array(embeddings[i+1])
+            a_norm = a / max(np.linalg.norm(a), 1e-8)
+            b_norm = b / max(np.linalg.norm(b), 1e-8)
+            sim = np.dot(a_norm, b_norm)
+            if sim > 0.82:
+                bucle_count += 1
+        
+        # Umbral: 3+ pares consecutivos muy similares = perseveración
+        if bucle_count >= 3:
+            # Extraer el tema dominante
+            tema = self._extract_dominant_topic([c.get("thought", "") for c in recent])
+            return {
+                "detected": True,
+                "tema": tema,
+                "bucle_count": bucle_count,
+            }
+        
+        return {"detected": False}
+
+
+    def _extract_dominant_topic(self, thoughts: list) -> str:
+        """Extrae el tema dominante de una lista de pensamientos."""
+        # Buscar frases repetidas
+        import re
+        candidates = {}
+        for t in thoughts:
+            # Extraer frases entre 20-80 chars
+            phrases = re.findall(r'[^.!?]{20,80}', t)
+            for p in phrases:
+                p = p.strip()
+                if len(p) > 20:
+                    candidates[p] = candidates.get(p, 0) + 1
+        
+        # Devolver la más repetida
+        if candidates:
+            return max(candidates, key=candidates.get)[:100]
+        return "tema no identificado"
+
+    def _consolidate_reflection(self, thought: str, thought_type: str, sandbox_success: bool = False):
+        """
+        Filtro de Consolidación Selectiva.
+        Una reflexión solo se guarda en ChromaDB si:
+        A) Generó una acción exitosa (sandbox_success = True)
+        B) Es semánticamente novedosa (distancia coseno < 0.75 con existentes)
+        """
+        # Filtro A: Validación pragmática
+        if sandbox_success:
+            try:
+                self.fm.cognitive_loop.episodic_memory.store_interaction(
+                    user_message=f"[{thought_type}]",
+                    assistant_response=thought,
+                    user_id=self.fm.cognitive_loop.user_id,
+                    metadata={
+                        "source": "internal_monologue",
+                        "type": "validated_theory",
+                        "importance": 0.7,
+                    }
+                )
+                print(f"   [Consolidación] Reflexión validada guardada en ChromaDB.")
+                return
+            except Exception:
+                pass
+        
+        # Filtro B: Novedad semántica
+        try:
+            emb = self.fm.stream._get_embedding(thought[:300])
+            if emb is None:
+                return
+            
+            import numpy as np
+            emb_arr = np.array(emb)
+            emb_norm = emb_arr / max(np.linalg.norm(emb_arr), 1e-8)
+            
+            # Buscar reflexiones existentes similares
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.collection.query(
+                query_texts=[thought[:300]],
+                n_results=1,
+                where={"source": "internal_monologue"},
+                include=["distances"],
+            )
+            distances = results.get("distances", [[]])[0]
+            
+            if distances and len(distances) > 0:
+                sim = 1.0 - distances[0]
+                if sim > 0.85:
+                    # Es rumiación, se descarta
+                    return
+                elif sim < 0.75:
+                    # Es novedoso, se guarda
+                    episodic.store_interaction(
+                        user_message=f"[{thought_type}]",
+                        assistant_response=thought,
+                        user_id=self.fm.cognitive_loop.user_id,
+                        metadata={
+                            "source": "internal_monologue",
+                            "type": "novel_insight",
+                            "importance": 0.5,
+                        }
+                    )
+                    print(f"   [Consolidación] Insight novedoso guardado en ChromaDB.")
+        except Exception:
+            pass

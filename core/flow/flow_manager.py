@@ -43,12 +43,33 @@ class FlowManager:
         from core.memory.associative_memory import AssociativeMemory, patch_episodic_memory_get_relevant
         from core.flow.trn_gate import TRNGate, Priority
         from core.flow.salience_network import SalienceNetwork
+        from core.flow.trn_gate import TRNGate
+        from core.perception.deep_reader import DeepReader
+        from core.perception.domain_filter import DomainFilter
+        from core.cognitive_registry import get_archetype
+
+        persona = self.cognitive_loop.load_persona()
+        self.archetype = get_archetype(persona)
+        persona = self.cognitive_loop.load_persona()
+        self.domain_filter = DomainFilter(persona, llm=self.llm)
+        self.deep_reader = DeepReader(llm=self.llm)
+
+        self.trn_gate = TRNGate()
         self.salience = SalienceNetwork.get_instance()
-        self.trn_gate = TRNGate.get_instance()
-        self.trn_gate.set_executor(self._execute_llm)
+        
         base_episodic = EpisodicMemory()
         patched_episodic = patch_episodic_memory_get_relevant(base_episodic)
         self.associative_memory = AssociativeMemory(patched_episodic)
+
+        # Indexar codebase si code_index está vacío
+        if hasattr(self.cognitive_loop.episodic_memory, 'code_collection'):
+            try:
+                if self.cognitive_loop.episodic_memory.code_collection.count() == 0:
+                    from mods.self_engineer.code_reader import CodeReader
+                    reader = CodeReader(Path.cwd())
+                    self.cognitive_loop.episodic_memory.index_codebase(reader)
+            except Exception:
+                pass
 
         self.stream._get_entity_context = self._get_entity_context
         self.stream._get_entity_context = self._get_entity_context
@@ -61,6 +82,7 @@ class FlowManager:
         self.interaction = FlowInteraction(self)
         self.maintenance = FlowMaintenance(self)
         
+        self._last_immune_check = None
         self.running = False
         self.thread = None
         self.last_thought_time: Optional[datetime] = None
@@ -182,7 +204,7 @@ class FlowManager:
                 
                 if self._last_emotion is not None and str(self._last_emotion) != str(new_emotion):
                     prompt = f"""<system_identity>
-Eres el núcleo cognitivo de Nexus. Procesando un cambio de estado interno.
+Eres el núcleo cognitivo. Procesando un cambio de estado interno.
 </system_identity>
 
 <state_change>
@@ -357,6 +379,11 @@ Responde en una frase corta en {IDIOMA}.
             for t in self.stream.active:
                 t.priority *= 0.5
             self.stream._update_active()
+            
+        # Modulación de parámetros del LLM según estrés
+        if ec > 0.80:
+            self.llm.set_cognitive_stress(ec)
+            print(f"   [Stress] ⚠️ Modo túnel activado: T=0.15, max_tokens=256")
     
     def _slow_tick(self):
         if not self.salience.is_dmn_active:
@@ -388,8 +415,6 @@ Responde en una frase corta en {IDIOMA}.
                         self.thoughts._generate_curiosity()
                     elif process_name == "simulation":
                         self.thoughts._generate_simulation()
-                    elif process_name == "web_search":
-                        self.maintenance._maybe_search_web()
                     elif process_name == "proactive_check":
                         self.maintenance._check_proactive()
                     elif process_name == "prospection":
@@ -406,6 +431,13 @@ Responde en una frase corta en {IDIOMA}.
         self.maintenance._run_detector_decay()
         self.maintenance._run_immune_check()
 
+        # Habituación Semántica (Sistema #20 extendido)
+        habituation = self.maintenance._check_semantic_habituation()
+        if habituation and habituation.get("detected"):
+            tema = habituation.get("tema", "tema recurrente")
+            print(f"   [Habituation] ⚠️ Perseveración detectada: '{tema}'. Inyectando inhibición.")
+            self._inject_habituation_inhibition(tema)
+
         # Olvido activo cada 60 minutos
         now = datetime.now()
         if not hasattr(self, '_last_active_forgetting'):
@@ -418,16 +450,50 @@ Responde en una frase corta en {IDIOMA}.
         #self.maintenance._run_deduplicate()
         
         self._save_snapshot("active")
-    
+
+        # Destilación cada 2 horas
+        if not hasattr(self, '_last_distillation'):
+            self._last_distillation = None
+        now = datetime.now()
+        if self._last_distillation is None or (now - self._last_distillation).total_seconds() >= 7200:
+            self._last_distillation = now
+            self.cognitive_loop._distill_to_semantic()
+
+        if not hasattr(self, '_last_buffer_validation'):
+            self._last_buffer_validation = None
+        now = datetime.now()
+        if self._last_buffer_validation is None or (now - self._last_buffer_validation).total_seconds() >= 7200:
+            self._last_buffer_validation = now
+            self.cognitive_loop.episodic_memory.validate_and_promote()
+            
     # ============================================
     # INTERACCIÓN CON EL USUARIO
     # ============================================
     
+    def _inject_habituation_inhibition(self, tema: str):
+        """Inyecta inhibición colinérgica forzada en el stream de pensamientos."""
+        from core.flow.flow_stream import ThoughtItem
+        
+        # Reducir prioridad de pensamientos sobre este tema
+        for t in self.stream.active:
+            t.priority *= 0.3
+        
+        # Inyectar pensamiento de redirección
+        self.stream.add_thought(ThoughtItem(
+            content=f"[Inhibición] Perseveración detectada sobre: '{tema}'. "
+                    f"Cambio obligatorio de foco. Explorar dominio no relacionado.",
+            thought_type="habituation_inhibition",
+            priority=0.9,
+            source="system"
+        ))
+        self.last_thought_time = datetime.now()
+        
+        # Guardar en curiosidades
+        self._store_curiosity(f"[Habituation] Inhibición por perseveración: {tema}")
+
     def handle_user_message(self, message: str) -> dict:
         # Activar Red de Saliencia: inhibir DMN
         self.salience.on_user_message()
-
-        self.trn_gate.on_user_message()
 
         # Atenuar la DMN en lugar de pausarla estáticamente (factor de inhibición GABA)
         for t in self.stream.thoughts:
@@ -464,7 +530,6 @@ Responde en una frase corta en {IDIOMA}.
         self._restore_attention()
         self.last_thought_time = datetime.now()
 
-        self.trn_gate.on_response_sent()
         self.salience.on_response_sent()  # Reactivar DMN
         return result
     
@@ -521,48 +586,19 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
             rel_path = str(f.relative_to(EXPLORE_DIR))
             if rel_path not in explored:
                 unanalyzed.append(f)
-            else:
-                try:
-                    last_explored = datetime.fromisoformat(explored[rel_path]["timestamp"])
-                    file_modified = datetime.fromtimestamp(f.stat().st_mtime)
-                    if file_modified > last_explored:
-                        unanalyzed.append(f)
-                except:
-                    unanalyzed.append(f)
         
         if unanalyzed:
-            file_to_analyze = self._select_optimal_file(unanalyzed)
+            file_to_analyze = self._select_optimal_file(unanalyzed) if hasattr(self, '_select_optimal_file') else unanalyzed[0]
         else:
-            file_to_analyze = self._select_optimal_file(files)
+            return
         
+        # Una sola llamada. FileAnalyzer ya decide qué hacer según la extensión.
         from core.perception.file_analyzer import FileAnalyzer
-        result = FileAnalyzer.get_instance().analyze_with_granularity(
-            str(file_to_analyze), level="detallado", llm=self.llm
-        )
+        result = FileAnalyzer.get_instance().analyze(str(file_to_analyze), llm=None)
         
         rel_path = str(file_to_analyze.relative_to(EXPLORE_DIR))
         self._store_exploration(rel_path, result)
-        
-        from core.memory.scaffolding import ScaffoldingManager
-        file_type = result.get("type", "unknown")
-        ScaffoldingManager().register_exploration(file_type, rel_path, result)
-        
-        if result.get("type") == "text":
-            content = result.get("content", "")
-        else:
-            content = result.get("summary", result.get("description", result.get("content", "")))
-        base_thought = f"Exploré {file_to_analyze.name}: {content}"
-
-        # Anclaje de Metadatos Relacionales: preservar el contexto macro del archivo
-        macro_context = f"[Origen: {rel_path} | Tipo: {file_type}]"
-        if content:
-            content = f"{macro_context}\n{content}"
-        enriched_thought = self.thoughts._enrich_thought_with_context(base_thought, "exploration", content if content else None)
-        
-        self.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="exploration", priority=0.5, source="file_exploration"))
-        self.last_thought_time = datetime.now()
-        self._store_curiosity(f"[Exploracion] {file_to_analyze.name}: {enriched_thought}")
-        print(f"   [Explore] {rel_path} ({file_type})")
+        print(f"   [Explore] {rel_path}")
     
     # ============================================
     # UTILIDADES
@@ -624,12 +660,12 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
         except:
             elapsed_str = "desconocido"
         
-        self.stream.add_thought(ThoughtItem(
-            content=f"[SISTEMA] Servidor reiniciado. Tiempo inactivo: {elapsed_str}. No hubo procesamiento durante este periodo.",
-            thought_type="wake",
-            priority=0.7,
-            source="system"
-        ))
+        #self.stream.add_thought(ThoughtItem(
+        #    content=f"[SISTEMA] Servidor reiniciado. Tiempo inactivo: {elapsed_str}. No hubo procesamiento durante este periodo.",
+        #    thought_type="wake",
+        #    priority=0.7,
+        #    source="system"
+        #))
         
         self_state = self.cognitive_loop.self_memory.load_state()
         if "evolucion" not in self_state:
@@ -640,7 +676,7 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
             "duracion_apagado": elapsed_str
         })
         self.cognitive_loop.self_memory.save_state(self_state)
-    
+        
     def _guard_state_changes(self, state_before):
         state_after = self.cognitive_loop.self_memory.load_state()
         confianza_before = state_before.get("relacion_con_usuario", {}).get("confianza", 0.5)

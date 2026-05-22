@@ -1,15 +1,19 @@
 {
   "name": "Self Engineer",
-  "version": "1.0.0",
-  "description": "Allows an entity to read, analyze, and propose improvements to its own source code. Includes sandboxed code execution for testing solutions.",
+  "version": "2.0.0",
+  "description": "Allows an entity to read, analyze, and propose improvements to its own source code using layered analysis (Repository Map → query_procedural → cross-domain resonance). Integrates with EnvironmentController for universal learning.",
   "author": "Sibelium",
   "dependencies": [],
-  "permissions": ["read_code", "execute_code"],
+  "permissions": [
+    "read_code",
+    "execute_code"
+  ],
   "config": {
-    "analysis_interval_hours": 6,
+    "analysis_interval_hours": 0.1,
     "max_file_size_chars": 6000,
     "execution_timeout_seconds": 10,
-    "self_review_enabled": true,
-    "test_solutions_enabled": true
-  }
+    "self_review_enabled": false,
+    "test_solutions_enabled": false
+  },
+  "queue_index": 20
 }

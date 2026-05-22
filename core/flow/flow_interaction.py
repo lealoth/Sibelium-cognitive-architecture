@@ -60,7 +60,25 @@ class FlowInteraction:
         )
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("respuesta_final")
-        response_text = self.fm.llm.generate(prompt, temperature=temp, max_tokens=800, purpose="respuesta_final")
+        from core.inference_loop import InferenceLoop
+        loop = InferenceLoop(self.fm.llm, self.fm.cognitive_loop.episodic_memory)
+        response_text = loop.run(prompt, temperature=0.8, max_tokens=800, purpose="respuesta_final")
+
+        # Detectar "Search for:" y ejecutar búsqueda web automática
+        import re
+        search_match = re.search(r'Search for:\s*(.+?)(?:\n|$)', response_text, re.IGNORECASE)
+        if search_match:
+            query = search_match.group(1).strip()
+            print(f"   [WebSearch] Detectada solicitud: '{query[:80]}...'")
+            try:
+                from core.environment_registry import EnvironmentRegistry
+                registry = EnvironmentRegistry.get_instance()
+                result = registry.parse_and_execute(f'<web_search query="{query}" />')
+                if result:
+                    response_text += f"\n\n[Resultados de búsqueda web]:\n{result[:800]}"
+                    print(f"   [WebSearch] Resultados inyectados en la respuesta.")
+            except Exception as e:
+                print(f"   [WebSearch] Error: {e}")
 
         # Post-procesos
         self._post_process_response(response_text, message, name)
@@ -128,6 +146,9 @@ class FlowInteraction:
         idiomas = {"ES": "Español", "EN": "English", "FR": "Français", "DE": "Deutsch", "PT": "Português"}
         saludo = "Abre con un saludo." if usuario_saluda else ""
         idioma_nombre = idiomas.get(idioma, "Español")
+        
+        network = needs.get("needs", "PERSONAL") if isinstance(needs, dict) else "PERSONAL"
+        
         prompt = f"""--- IDENTITY ---
     Eres {name}.
     --- END IDENTITY ---
@@ -142,7 +163,6 @@ class FlowInteraction:
     "{reflexion}"
     --- END RESONANCE ---
     """
-        # ALIGNMENT desde persona.json (si existe)
         persona = self.fm.cognitive_loop.load_persona()
         speech_text = self._speech_text(persona, name)
         if speech_text:
@@ -154,118 +174,433 @@ class FlowInteraction:
         epistemic = persona.get("epistemic_bounds", "")
         if epistemic:
             prompt += f"""--- BOUNDS ---
-        {epistemic}
-        --- END BOUNDS ---
-        """
-
-        prompt += f"""--- SOCIAL ---
-    {saludo}
-    --- END SOCIAL ---
+    {epistemic}
+    --- END BOUNDS ---
     """
-        # Secciones condicionales
-        sections = {
-            "MEMORY": fetched.get("MEMORY", ""),
-            "TIME": fetched.get("TIME", ""),
-            "USER": fetched.get("USER", ""),
-            "ACTIVITY": fetched.get("ACTIVITY", ""),
-            "WEB": fetched.get("WEB", ""),
-        }
-        for tag, content in sections.items():
-            if tag in needs.upper() and content:
+        directives = persona.get("system_directives", {})
+        if directives:
+            style = directives.get("cognitive_style", "")
+            constraints = directives.get("output_constraints", [])
+            if style or constraints:
+                prompt += f"--- OPERATIVE CONSTRAINTS ---\n"
+                if style:
+                    prompt += f"Style: {style}\n"
+                if constraints:
+                    prompt += "\n".join([f"- {c}" for c in constraints])
+                prompt += f"\n--- END OPERATIVE CONSTRAINTS ---\n"
+
+        computational = persona.get("computational_bounds", "")
+        if computational:
+            prompt += f"--- COMPUTATIONAL BOUNDS ---\n{computational}\n--- END COMPUTATIONAL BOUNDS ---\n"
+
+        prompt += f"--- HISTORY ---\n{self.fm.cognitive_loop._get_short_term_history(name, user_name)}\n--- END HISTORY ---\n"
+
+        # Secciones condicionales según macro-red
+        for tag, content in fetched.items():
+            if content:
                 prompt += f"--- {tag} ---\n{content}\n--- END {tag} ---\n"
 
+        if isinstance(needs, dict):
+            networks_str = needs.get("needs", "PERSONAL")
+        else:
+            networks_str = str(needs)
+        networks = [n.strip() for n in networks_str.split(",")]
+
+        # Aprendizajes si PERSONAL está en las redes
+        if "PERSONAL" in networks:
+            aprendizajes = self._fetch_learnings(message)
+            if aprendizajes:
+                prompt += f"--- LEARNINGS ---\n{aprendizajes}\n--- END LEARNINGS ---\n"
+
+        # Priming semántico si WORK o PERSONAL están
+        if "WORK" in networks or "PERSONAL" in networks:
+            semantic_context = self._fetch_semantic_context(message)
+            if semantic_context:
+                prompt += f"--- KNOWLEDGE ---\n{semantic_context}\n--- END KNOWLEDGE ---\n"
+
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(message)
+            print(f"   [Epistemic] Confidence: {confidence:.2f} | Threshold: 0.45 | Boundary: {'YES' if confidence < 0.45 else 'NO'}")
+        except Exception:
+            confidence = 0.5
+
+        # Anclas de intención puras (verbos universales, sin dominio)
+        opt_anchor = self.fm.stream._get_embedding(
+            "optimize improve fix solve reduce enhance configure update upgrade accelerate"
+        )
+        insp_anchor = self.fm.stream._get_embedding(
+            "explain describe how does work what is list show find query analyze"
+        )
+
+        # Vector de dominio (top 10 keywords del DomainFilter)
+        domain_keywords = self.fm.domain_filter.get_keywords()[:10] if hasattr(self.fm, 'domain_filter') else []
+        domain_str = " ".join(domain_keywords) if domain_keywords else ""
+        domain_anchor = self.fm.stream._get_embedding(domain_str) if domain_str else None
+
+        if opt_anchor and insp_anchor:
+            msg_emb = self.fm.stream._get_embedding(message)
+            msg_arr = np.array(msg_emb)
+            msg_arr = msg_arr / np.linalg.norm(msg_arr)
+            
+            opt_arr = np.array(opt_anchor) / np.linalg.norm(opt_anchor)
+            insp_arr = np.array(insp_anchor) / np.linalg.norm(insp_anchor)
+            
+            sim_opt = float(np.dot(msg_arr, opt_arr))
+            sim_insp = float(np.dot(msg_arr, insp_arr))
+            
+            is_optimization_intent = (sim_opt > sim_insp) and (sim_opt > 0.38)
+            
+            if domain_anchor is not None:
+                domain_arr = np.array(domain_anchor) / np.linalg.norm(domain_anchor)
+                sim_domain = float(np.dot(msg_arr, domain_arr))
+                in_domain = sim_domain > 0.45
+            else:
+                in_domain = True  # Sin dominio definido, asumir que todo aplica
+            
+            force_web_search = is_optimization_intent and in_domain
+        else:
+            force_web_search = False
+
+        # Decisión final de búsqueda web
+        if confidence < 0.45 or force_web_search:
+            web_context = self._fetch_web_context(message)
+            if web_context:
+                prompt += f"""--- EXTERNAL KNOWLEDGE (web search) ---
+        {web_context}
+        --- END EXTERNAL KNOWLEDGE ---
+
+        --- DIRECTIVE ---
+        Compare your internal memory with the external knowledge above.
+        If your internal memory only describes the current state but does not contain
+        the solution, base your answer on the external knowledge.
+        """
+            elif confidence < 0.45:
+                prompt += f"""--- EPISTEMIC BOUNDARY ---
+        WARNING: No reliable records or web results. State your uncertainty.
+        --- END EPISTEMIC BOUNDARY ---
+        """
+
+        recent_errors = self._get_recent_prediction_errors()
+        if recent_errors:
+            prompt += f"""--- RECENT CORRECTIONS (HIGH PRIORITY) ---
+        {recent_errors}
+        --- END CORRECTIONS ---
+        """
+
         prompt += f"""--- USER INPUT ---
-{user_name}: "{message}"
---- END INPUT ---
+    {user_name}: "{message}"
+    --- END INPUT ---
 
---- DIRECTIVE ---
-Responde a {user_name}.
-1. Habla DESDE el personaje, no SOBRE tus instrucciones.
-2. Si hay INTERNAL ACTIVITY LOG, analiza esos datos para responder sobre tu actividad. Transmite los datos de forma fluida y natural, sin listar marcas de tiempo ni nombres técnicos.
-3. Cuando el usuario te pregunte sobre TI (tus pensamientos, tus emociones, tu perspectiva), responde desde TU punto de vista. No proyectes en el usuario.
-4. IDIOMA: {idioma_nombre}.
---- END DIRECTIVE ---
-"""
+    --- DIRECTIVE ---
+    Responde a {user_name}.
+    1. Habla DESDE el personaje, no SOBRE tus instrucciones.
+    2. Si hay INTERNAL ACTIVITY LOG, analiza esos datos para responder sobre tu actividad. Transmite los datos de forma fluida y natural, sin listar marcas de tiempo ni nombres técnicos.
+    3. Cuando el usuario te pregunte sobre TI (tus pensamientos, tus emociones, tu perspectiva), responde desde TU punto de vista. No proyectes en el usuario.
+    4. IDIOMA: {idioma_nombre}."""
+        modifiers = self.fm.archetype.get("prompt_modifiers", [])
+        if modifiers:
+            for i, mod in enumerate(modifiers, start=5):
+                prompt += f"{i}. {mod}\n"
+        prompt +="""--- END DIRECTIVE ---"""
 
-        print(f"   [Prompt] Secciones activas: {needs}")
+        print(f"   [Prompt] Red activa: {network}")
         print(f"   [Prompt] Tamaño estimado: ~{len(prompt)//4} tokens")
-        # Log de secciones inyectadas
-        secciones_activas = []
-        if "MEMORY" in needs.upper() and fetched.get("MEMORY"): secciones_activas.append("MEMORY")
-        if "TIME" in needs.upper() and fetched.get("TIME"): secciones_activas.append("TIME")
-        if "USER" in needs.upper() and fetched.get("USER"): secciones_activas.append("USER")
-        if "SELF" in needs.upper() and fetched.get("SELF"): secciones_activas.append("SELF")
-        if "ACTIVITY" in needs.upper() and fetched.get("ACTIVITY"): secciones_activas.append("ACTIVITY")
-        if "WEB" in needs.upper() and fetched.get("WEB"): secciones_activas.append("WEB")
+        secciones_activas = [tag for tag, content in fetched.items() if content]
         print(f"   [Prompt] Secciones inyectadas: {', '.join(secciones_activas) if secciones_activas else 'NINGUNA (solo base)'}")
         print(f"   [Prompt] Tamaño: ~{len(prompt)//4} tokens")
         return prompt
 
+    def _get_recent_prediction_errors(self) -> str:
+        """Recupera errores de predicción recientes del stream activo."""
+        errors = []
+        for t in self.fm.stream.active[-5:]:
+            if getattr(t, 'type', '') == 'error_feedback':
+                errors.append(t.content[:300])
+        return "\n".join(errors) if errors else ""
 
+    def _fetch_web_context(self, query: str) -> str:
+        # Añadir contexto del dominio para desambiguar
+        domain_context = ""
+        if hasattr(self.fm, 'domain_filter'):
+            keywords = self.fm.domain_filter.get_keywords()[:5]
+            if keywords:
+                domain_context = " ".join(keywords)
+        
+        search_query = f"{query} {domain_context}" if domain_context else query
+        
+        try:
+            from ddgs import DDGS
+            results = DDGS().text(search_query[:200], max_results=3)
+            if results:
+                snippets = []
+                for r in results:
+                    body = r.get("body", "")[:300]
+                    if body:
+                        snippets.append(body)
+                result = "\n".join(snippets) if snippets else ""
+                print(f"   [WebContext] Buscado: '{search_query[:60]}...' → {len(snippets)} snippets")
+                return result
+            print(f"   [WebContext] Buscado: '{search_query[:60]}...' → SIN RESULTADOS")
+        except Exception as e:
+            print(f"   [WebContext] Error: {e}")
+        return ""
+
+    def _fetch_learnings(self, message: str) -> str:
+        """Recupera aprendizajes conversacionales previos (top 2, máx 300 chars)."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.collection.query(
+                query_texts=[message[:300]],
+                n_results=2,
+                where={"type": "validated_interaction"}
+            )
+            docs = results.get("documents", [[]])[0]
+            if docs:
+                return "\n---\n".join([d[:300] for d in docs])
+        except Exception:
+            pass
+        return ""
+
+    def _fetch_semantic_context(self, message: str) -> str:
+        """Busca conocimiento relevante en semantic_library."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.query_semantic(query=message[:500], n_results=3)
+            if results:
+                return "\n---\n".join([r["content"][:400] for r in results])
+        except Exception:
+            pass
+        return ""
     # ============================================
     # ROUTER + FETCH
     # ============================================
 
-    def _decide_info_needs(self, user_msg: str) -> str:
-        categories = {
-            "TIME": "hora fecha momento actual cuando tiempo",
-            "USER": "nombre apodo perfil datos personales quién eres tú",
-            "SELF": "cómo estás emociones estado ánimo sientes",
-            "MEMORY": "recuerdas pasado historial conversación anterior",
-            "ACTIVITY": "pensamientos recientes reflexiones fondo proceso",
-            "WEB": "internet buscar consulta noticias actualidad",
-            "FILE": "archivo documento subido leer analizar",
+    def _build_router_profiles(self) -> dict:
+        """
+        Construye perfiles de ruteo dinámicos basados en el ecosistema de la entidad.
+        Sin hardcodeo. Se adapta al rol, herramientas y colecciones de cada entidad.
+        """
+        persona = self.fm.cognitive_loop.load_persona()
+        name = persona.get("name", "Entidad")
+        personality = persona.get("personality_desc", "")
+        role_type = persona.get("role_type", "")
+        capabilities = persona.get("capabilities", [])
+        epistemic = persona.get("epistemic_bounds", "")
+        
+        profiles = {
+            "PERSONAL": [
+                "quién eres tú, tu nombre, tu identidad, autoconciencia y estados de ánimo",
+                "nuestra conversación, mi relación contigo, tus pensamientos internos",
+                personality[:200] if personality else f"personalidad de {name}",
+            ],
+            "WORK": [
+                "ejecutar mi tarea principal, mi rol asignado, lógica, análisis y razonamiento complejo",
+                "resolver el problema planteado, procesar la información técnica de mi especialidad",
+            ],
+            "EXTERNAL": [
+                "buscar información fuera, usar herramientas externas, interactuar con el entorno",
+                "internet, búsqueda web, noticias, consulta externa, archivos externos",
+            ],
         }
+        
+        # Inyectar por tipo de rol (dinámico, sin if/else masivo)
+        role_keywords = {
+            "self_engineer": [
+                "código fuente, refactorización de funciones, bugs, algoritmos y scripts",
+                "análisis de arquitectura de software, archivos del repositorio, métodos y clases",
+                "optimización de rendimiento, complejidad algorítmica, token usage",
+            ],
+            "researcher": [
+                "análisis de papers, documentación técnica, teoría y conceptos abstractos",
+                "metodología científica, revisión de literatura, hipótesis y conclusiones",
+            ],
+            "data_analyst": [
+                "análisis estadístico, bases de datos, gráficos, métricas y archivos CSV",
+                "procesamiento de datos cuantitativos, tendencias y modelos predictivos",
+            ],
+        }
+        
+        if role_type in role_keywords:
+            profiles["WORK"].extend(role_keywords[role_type])
+        
+        # Inyectar por capabilities (genérico, sin hardcodeo)
+        capability_keywords = {
+            "code_reading": "código fuente, archivos Python, lectura de scripts y módulos",
+            "code_analysis": "análisis de código, bugs, refactorización, optimización",
+            "file_indexing": "indexación de archivos, fragmentos de código, documentación",
+            "research": "investigación, papers, documentación técnica, teoría",
+            "conversation": "conversación, diálogo, interacción con el usuario, preguntas y respuestas",
+        }
+        
+        for cap in capabilities:
+            if cap in capability_keywords:
+                profiles["WORK"].append(capability_keywords[cap])
+        
+        # Inyectar por herramientas registradas (EXTERNAL dinámico)
         try:
-            emb = self.fm.stream._get_embedding(user_msg)
-            if emb is None:
-                return "SELF"
-            msg_norm = np.array(emb) / max(np.linalg.norm(emb), 1e-8)
+            from core.environment_registry import EnvironmentRegistry
+            registry = EnvironmentRegistry.get_instance()
+            for tool_name in registry.registered_tools:
+                profiles["EXTERNAL"].append(f"usar la herramienta {tool_name}")
+        except Exception:
+            pass
+        
+        # Inyectar epistemic_bounds como contexto WORK
+        if epistemic:
+            profiles["WORK"].append(epistemic[:200])
+        
+        return profiles
+
+    def _decide_info_needs(self, user_msg: str, context: str = "") -> dict:
+        """Router por Multi-Ejemplares con Max-Pooling y Umbral Adaptativo."""
+        profiles = self._build_router_profiles()
+        
+        try:
+            msg_emb = self.fm.stream._get_embedding(user_msg)
+            if msg_emb is None:
+                return {"needs": "PERSONAL", "temporal_focus": "recent"}
+            
+            import numpy as np
+            import math
+            
+            msg_arr = np.array(msg_emb)
+            msg_norm = msg_arr / max(np.linalg.norm(msg_arr), 1e-8)
+            
+            if not hasattr(self, '_exemplar_cache'):
+                self._exemplar_cache = {}
             
             scores = {}
-            activated = []
-            for tag, desc in categories.items():
-                cat_emb = self.fm.stream._get_embedding(desc)
-                if cat_emb is None:
-                    continue
-                cat_norm = np.array(cat_emb) / max(np.linalg.norm(cat_emb), 1e-8)
-                sim = np.dot(msg_norm, cat_norm)
-                scores[tag] = sim
-                if sim >= 0.45:
-                    activated.append(tag)
+            for network, exemplars in profiles.items():
+                network_scores = []
+                for ex in exemplars:
+                    cache_key = f"{network}:{ex[:80]}"
+                    if cache_key not in self._exemplar_cache:
+                        ex_emb = self.fm.stream._get_embedding(ex)
+                        if ex_emb is None:
+                            continue
+                        ex_arr = np.array(ex_emb)
+                        ex_norm = ex_arr / max(np.linalg.norm(ex_arr), 1e-8)
+                        self._exemplar_cache[cache_key] = ex_norm
+                    
+                    ex_norm = self._exemplar_cache[cache_key]
+                    sim = float(np.dot(msg_norm, ex_norm))
+                    network_scores.append(sim)
+                
+                scores[network] = max(network_scores) if network_scores else 0.0
             
-            # LOG: mostrar todas las puntuaciones
-            score_log = " | ".join([f"{tag}:{scores[tag]:.2f}" for tag in categories if tag in scores])
-            print(f"   [Router] \"{user_msg[:60]}...\"")
-            print(f"   [Router] Scores: {score_log}")
-            print(f"   [Router] Activados: {', '.join(activated) if activated else 'SELF (default)'}")
+            # Umbral Adaptativo por Entropía
+            activated = self._dynamic_threshold(scores)
             
-            return ", ".join(activated) if activated else "SELF"
+            print(f"   [Router] \"{user_msg}...\"")
+            print(f"   [Router] Scores: " + " | ".join([f"{k}:{v:.2f}" for k, v in scores.items()]))
+            print(f"   [Router] Activados: {', '.join(activated)}")
+            
+            from core.memory.episodic_memory import determinar_temporal_focus
+            temporal_focus = determinar_temporal_focus(user_msg)
+            
+            needs_str = ", ".join(activated)
+            return {"needs": needs_str, "temporal_focus": temporal_focus}
+        
         except Exception:
-            return "SELF"
+            return {"needs": "PERSONAL", "temporal_focus": "recent"}
 
-    def _fetch_info(self, needed: str, user_msg: str) -> dict:
-        """Recupera solo la información necesaria según el router."""
-        info = {}
-        handlers = {
-            "TIME": lambda m: f"Hora actual: {__import__('core.perception.time_perception', fromlist=['get_time_context']).get_time_context(None)}",
-            "USER": self._fetch_user,
-            "SELF": self._fetch_self,
-            "ACTIVITY": self._fetch_activity,
-            "MEMORY": lambda m: self._fetch_memory(m, self._current_temporal_focus),
-            "WEB": lambda m: self._fetch_web(m),
-            "FILE": self._fetch_files,
-        }
-        for tag, handler in handlers.items():
-            if tag in needed.upper():
-                try:
-                    result = handler(user_msg) if tag != "MEMORY" else handler(user_msg)
-                    if result:
-                        info[tag] = result
-                except Exception as e:
-                    print(f"   [!] Error en fetch {tag}: {e}")
-        return info
 
+    def _dynamic_threshold(self, scores: dict) -> list:
+        """
+        Umbral Adaptativo basado en Entropía de Shannon.
+        - Alta entropía (scores similares) → umbral bajo → más redes activadas
+        - Baja entropía (ganador claro) → umbral alto → solo la red dominante
+        
+        Fórmula: τ = α_max - (H_norm × (α_max - α_min))
+        """
+        import numpy as np
+        import math
+        
+        networks = list(scores.keys())
+        raw_scores = np.array(list(scores.values()))
+        
+        # Softmax con temperatura T=0.1 para acentuar diferencias
+        T = 0.1
+        e_scores = np.exp(raw_scores / T)
+        probs = e_scores / np.sum(e_scores)
+        
+        # Entropía de Shannon
+        entropy = -np.sum(probs * np.log2(probs + 1e-9))
+        
+        # Entropía normalizada (máx para N=3 es log2(3) ≈ 1.585)
+        max_entropy = math.log2(len(networks))
+        norm_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
+        
+        # Umbral dinámico: α_min=0.35, α_max=0.60
+        alpha_min = 0.35
+        alpha_max = 0.60
+        threshold = alpha_max - (norm_entropy * (alpha_max - alpha_min))
+        
+        # Activar redes que superen el umbral
+        activated = [net for net, score in scores.items() if score >= threshold]
+        
+        # Si ninguna supera, activar la de mayor score
+        if not activated:
+            activated = [max(scores, key=scores.get)]
+        
+        return activated
+
+    def _fetch_info(self, needed: dict, user_msg: str) -> dict:
+        networks = needed.get("needs", ["PERSONAL"])
+        if isinstance(networks, str):
+            networks = [n.strip() for n in networks.split(",")]
+        
+        temporal_focus = needed.get("temporal_focus", "recent")
+        fetched = {}
+        
+        for network in networks:
+            if network == "PERSONAL":
+                fetched["SELF"] = self._fetch_self(user_msg)
+                fetched["USER"] = self._fetch_user(user_msg)
+                fetched["MEMORY"] = self._fetch_memory(user_msg, temporal_focus)
+            elif network == "WORK":
+                fetched["MEMORY"] = self._fetch_memory(user_msg, temporal_focus)
+                fetched["SEMANTIC"] = self._fetch_semantic_context(user_msg)
+                fetched["CODE"] = self._fetch_code_context(user_msg)
+            elif network == "EXTERNAL":
+                fetched["WEB"] = self._fetch_web(user_msg)
+                fetched["FILE"] = self._fetch_files(user_msg)
+        
+        return fetched
+
+    def _fetch_code_context(self, user_msg: str) -> str:
+        """Busca fragmentos de código en procedural_index con firmas pre-digeridas."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.query_procedural(user_msg, n_results=3)
+            if results:
+                fragmentos = []
+                for r in results:
+                    code = r.get('code', '')
+                    # Extraer firmas para pre-digestión
+                    signatures = self._extract_signatures(code)
+                    fragmentos.append(
+                        f"[{r.get('file', '')} - {r.get('function', '')} (L{r.get('line_range', '')})]:\n"
+                        f"{signatures}\n"
+                        f"---\n"
+                        f"{code}"
+                    )
+                return "\n\n".join(fragmentos)
+        except Exception:
+            pass
+        return ""
+
+    def _extract_signatures(self, code_fragment: str) -> str:
+        """Extrae firmas de métodos y clases de un fragmento de código."""
+        import re
+        signatures = []
+        for line in code_fragment.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('def ') or stripped.startswith('class '):
+                signatures.append(stripped[:120])
+        if signatures:
+            return "Available signatures:\n" + "\n".join(signatures)
+        return ""
     # ============================================
     # FETCH HANDLERS
     # ============================================
@@ -298,20 +633,56 @@ Responde a {user_name}.
         return ""
 
     def _fetch_memory(self, user_msg: str, temporal_focus: str = "recent") -> str:
+        """
+        Recupera memorias con vecindad asociativa (Sistema #33) y foco temporal modulado.
+        Incluye LTP Hebbiana: refuerza importancia de las memorias inyectadas.
+        """
         try:
             results = self.associative_memory.get_relevant_with_neighbors(
-                query=user_msg, user_id=self.fm.cognitive_loop.user_id,
-                limit=5, max_neighbors_per_memory=5, temporal_focus=temporal_focus,
+                query=user_msg,
+                user_id=self.fm.cognitive_loop.user_id,
+                limit=5,
+                max_neighbors_per_memory=5,
+                temporal_focus=temporal_focus,
             )
             if not results:
                 older = self._progressive_memory_search(user_msg)
-                return "MEMORIAS:\n" + "\n".join([f"- {m}" for m in older[:5]]) if older else ""
-            # LTP Hebbiana
-            self._reinforce_memories(results[:3])
-            print(f"   [Memory] Recuperadas {len(results)} memorias" if results else "   [Memory] Sin resultados")
-            return self.associative_memory.build_context_block(results, max_total_chars=1500, max_neighbor_chars=300)
+                if older:
+                    fragmentos = [m[:400] for m in older[:3]]
+                    return "<episodic_memory>\n" + "\n---\n".join(fragmentos) + "\n</episodic_memory>"
+                return ""
+
+            # LTP Hebbiana: reforzar importancia de las 3 memorias inyectadas
+            memorias_inyectadas = results[:3]
+            ids_a_actualizar = []
+            metadatas_a_actualizar = []
+            
+            for r in memorias_inyectadas:
+                meta = r.get("metadata", {}) or {}
+                importancia_actual = meta.get("importance", 0.5)
+                nueva_imp = min(1.0, importancia_actual + 0.05)
+                nueva_meta = {**meta, "importance": nueva_imp}
+                ids_a_actualizar.append(r["primary_id"])
+                nueva_meta["last_accessed"] = datetime.now().isoformat()
+                metadatas_a_actualizar.append(nueva_meta)
+            
+            if ids_a_actualizar:
+                try:
+                    em = self.fm.associative_memory._em
+                    em.collection.update(ids=ids_a_actualizar, metadatas=metadatas_a_actualizar)
+                except Exception:
+                    pass
+
+            # Top 3-5 fragmentos, máximo 400 chars cada uno
+            fragmentos = []
+            for r in results[:5]:
+                texto = r["primary"] if isinstance(r, dict) else r
+                fragmentos.append(texto[:400])
+
+            return "<episodic_memory>\n" + "\n---\n".join(fragmentos) + "\n</episodic_memory>"
+
         except Exception as e:
-            print(f"   [!] Error en _fetch_memory: {e}")
+            print(f"   [!] Error en _fetch_memory asociativa: {e}")
             return ""
 
     def _reinforce_memories(self, memories):
@@ -384,10 +755,19 @@ Responde a {user_name}.
             return "el usuario"
 
     def _speech_text(self, persona: dict, name: str) -> str:
-        examples = persona.get("speech_examples", [])
+        examples = persona.get("speech_examples", "")
         if not examples:
             return ""
-        return "\n\n".join([f'Input: "{ex["user"]}"\n{name}: "{ex["assistant"]}"' for ex in examples[:2]])
+        # Si es un string simple, devolverlo tal cual
+        if isinstance(examples, str):
+            return examples
+        # Si es una lista de dicts (formato antiguo)
+        if isinstance(examples, list) and examples:
+            return "\n\n".join([
+                f'Input: "{ex.get("user", "")}"\n{name}: "{ex.get("assistant", "")}"'
+                for ex in examples[:2]
+            ])
+        return ""
 
     def _clean_reflexion(self, reflexion: str) -> str:
         if not reflexion:

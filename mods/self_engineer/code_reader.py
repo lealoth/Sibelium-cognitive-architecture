@@ -38,7 +38,7 @@ class CodeReader:
                 results.append({"file": path, "function": name})
         return results
     
-    def get_context_for_llm(self, path: str, max_chars: int = 4000) -> str:
+    def get_context_for_llm(self, path: str, max_chars: int = 10000) -> str:
         file_data = self.get_file(path)
         if "error" in file_data:
             return file_data["error"]
@@ -75,3 +75,15 @@ class CodeReader:
     
     def _extract_imports(self, content: str) -> List[str]:
         return re.findall(r'^(?:from\s+\S+\s+)?import\s+(.+)$', content, re.MULTILINE)
+
+    def extract_skeleton(self, content: str) -> str:
+        lines = content.split('\n')
+        skeleton = []
+        for i, line in enumerate(lines, 1):
+            s = line.strip()
+            if s.startswith(('import ', 'from ', 'class ', 'def ', '@')):
+                skeleton.append(f"L{i}: {s}")
+            elif s.startswith('"""') or s.startswith("'''"):
+                if len(s) > 3:
+                    skeleton.append(f"L{i}: {s[:100]}")
+        return '\n'.join(skeleton) if skeleton else "(Estructura no detectada)"

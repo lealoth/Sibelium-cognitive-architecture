@@ -1,5 +1,6 @@
 """Memoria episódica con ChromaDB y Vector de Dirección Narrativa."""
 import uuid
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -8,39 +9,87 @@ import numpy as np
 from config import CHROMA_PATH
 from datetime import datetime
 
+
 class EpisodicMemory:
     def __init__(self):
         self.persist_directory = Path(CHROMA_PATH)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=str(self.persist_directory))
+        
+        # 1. Memoria Episódica (Hipocampo) - Historial, interacciones, aprendizajes
         self.collection = self.client.get_or_create_collection(name="episodic_memory")
-        # Vector de Dirección Narrativa (promedio móvil de embeddings)
+        
+        # 2. Memoria Procedural (Ganglios Basales) - Código, APIs, comandos
+        self.procedural_collection = self.client.get_or_create_collection(name="procedural_index")
+        
+        # 3. Memoria Semántica (Córtex Temporal) - Papers, teoría, documentación
+        self.semantic_collection = self.client.get_or_create_collection(name="semantic_library")
+        
         self._narrative_direction: Optional[np.ndarray] = None
 
+        self.working_buffer = self.client.get_or_create_collection(name="working_buffer")
+
     # ============================================
-    # CRUD
+    # CRUD - MEMORIA EPISÓDICA
     # ============================================
 
     def store_interaction(self, user_message: str, assistant_response: str, user_id: str = "default", metadata: dict = None):
+        from core.memory.chunking import SemanticChunker
+        
         content = f"Usuario: {user_message}\nIA: {assistant_response}"
-        document_id = str(uuid.uuid4())
         
-        base_metadata = {
-            "user_message": user_message,
-            "assistant_response": assistant_response,
-            "user_id": user_id,
-            "timestamp": datetime.now().isoformat(),
-        }
-        if metadata:
-            base_metadata.update(metadata)
+        # Si la interacción es corta, guardar completa
+        if len(content) <= 2000:
+            document_id = str(uuid.uuid4())
+            base_metadata = {
+                "source": "user_interaction",
+                "user_message": user_message or "",
+                "assistant_response": assistant_response or "",
+                "user_id": user_id or "default",
+                "timestamp": datetime.now().isoformat(),
+            }
+            if metadata:
+                base_metadata.update(metadata)
+            
+            clean_meta = self._sanitize_meta(base_metadata)  # ← AÑADIR
+            
+            self.collection.add(
+                documents=[content],
+                metadatas=[clean_meta],
+                ids=[document_id],
+            )
+
+            self._update_narrative_direction(content)
+            return document_id
         
-        self.collection.add(
-            documents=[content],
-            metadatas=[base_metadata],
-            ids=[document_id],
-        )
+        # Si es larga, fragmentar semánticamente
+        chunker = SemanticChunker(target_chars=1500, overlap_chars=200)
+        chunks = chunker.chunk_semantic(content, content_type="text")
+        
+        parent_id = str(uuid.uuid4())[:8]
+        for chunk in chunks:
+            base_metadata = {
+                "source": "user_interaction",
+                "user_id": user_id,
+                "timestamp": datetime.now().isoformat(),
+                "fragment_id": chunk["fragment_id"],
+                "fragment_index": chunk["fragment_index"],
+                "total_fragments": chunk["total_fragments"],
+                "prev_fragment_id": chunk.get("prev_fragment_id", ""),
+                "next_fragment_id": chunk.get("next_fragment_id", ""),
+                "parent_interaction": parent_id,
+                "section": chunk.get("section", ""),
+            }
+            if metadata:
+                base_metadata.update(metadata)
+            self.collection.add(
+                documents=[chunk["text"]],
+                metadatas=[base_metadata],
+                ids=[f"{parent_id}_{chunk['fragment_id']}"],
+            )
+        
         self._update_narrative_direction(content)
-        return document_id
+        return parent_id
 
     def get_relevant(self, query: str, user_id: str = None, limit: int = 5, **kwargs) -> list:
         print(f"🔍 Buscando memorias para: {query[:50]}...")
@@ -56,7 +105,7 @@ class EpisodicMemory:
             if user_id:
                 results = self.collection.query(
                     query_texts=[search_query],
-                    n_results=min(limit * 3, count),  # Buscar más para reordenar
+                    n_results=min(limit * 3, count),
                     where={"user_id": user_id}
                 )
             else:
@@ -72,8 +121,6 @@ class EpisodicMemory:
             if not documents:
                 return []
 
-            # Puntuación Trimétrica: Similitud + Recencia + Importancia
-            import numpy as np
             scored = []
             now = datetime.now()
 
@@ -83,20 +130,30 @@ class EpisodicMemory:
                 recencia = 0.5
                 meta = metadatas[i] if i < len(metadatas) else {}
                 timestamp_str = meta.get("timestamp", "")
+                hours_elapsed = 168.0
                 if timestamp_str:
                     try:
                         ts = datetime.fromisoformat(timestamp_str)
                         hours_elapsed = (now - ts).total_seconds() / 3600.0
-                        recencia = max(0.0, 1.0 - hours_elapsed / 168.0)  # Decae en 1 semana
+                        recencia = max(0.0, 1.0 - hours_elapsed / 168.0)
                     except Exception:
                         pass
 
                 importancia = meta.get("importance", 0.5)
-
                 temporal_focus = kwargs.get("temporal_focus", "recent")
+                # Factor de decaimiento por último acceso
+                last_accessed_str = meta.get("last_accessed", "")
+                decay_factor = 1.0
+                if last_accessed_str:
+                    try:
+                        last_accessed = datetime.fromisoformat(last_accessed_str)
+                        days_since = (now - last_accessed).days
+                        decay_factor = math.exp(-0.1 * max(0, days_since))
+                    except Exception:
+                        pass
                 puntaje = calcular_score_trimetrico(
                     similitud=similitud,
-                    hours_elapsed=(now - ts).total_seconds() / 3600.0 if timestamp_str else 168.0,
+                    hours_elapsed=hours_elapsed,
                     importancia=importancia,
                     temporal_focus=temporal_focus
                 )
@@ -112,17 +169,6 @@ class EpisodicMemory:
             return []
 
     def get_relevant_with_contradiction(self, response_text: str, user_id: str = None, limit: int = 1) -> dict:
-        """
-        Detección de contradicción híbrida calibrada para all-MiniLM-L6-v2.
-        
-        Zonas:
-        - score < 0.55: Terreno nuevo → OK
-        - 0.55 <= score <= 0.72: Incertidumbre → LLM local evalúa
-        - score > 0.72: Alta densidad factual → LLM local evalúa, si contradicción → ESCALAR
-        
-        Returns:
-            dict con veredicto, score_confianza, y metadata
-        """
         try:
             count = self.collection.count()
             if count == 0:
@@ -152,11 +198,9 @@ class EpisodicMemory:
             distancia = distances[0] if distances else 1.0
             score_confianza = 1.0 - distancia
 
-            # Zona verde: terreno nuevo
             if score_confianza < 0.55:
                 return {"veredicto": "OK", "score_confianza": score_confianza}
 
-            # Zona gris y roja: evaluación con LLM local
             prompt = f"""<system_identity>
 Eres el sistema de detección de contradicciones.
 </system_identity>
@@ -184,7 +228,6 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
 
             if "CONTRADICCION" in veredicto_llm.upper():
                 if score_confianza > 0.72:
-                    # Zona roja: escalar a Gemini
                     return {
                         "veredicto": "ESCALAR_A_GEMINI",
                         "score_confianza": score_confianza,
@@ -192,7 +235,6 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
                         "razon": veredicto_llm
                     }
                 else:
-                    # Zona gris: regenerar local a baja temperatura
                     return {
                         "veredicto": "REGENERAR_LOCAL",
                         "score_confianza": score_confianza,
@@ -205,7 +247,7 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
         except Exception as e:
             print(f"❌ Error en búsqueda de contradicciones: {e}")
             return {"veredicto": "OK", "score_confianza": 0.0}
-    
+
     def reset(self):
         if self.collection.count() > 0:
             try:
@@ -231,12 +273,46 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
             print(f"Error en get_by_time_range: {e}")
             return []
 
+    def active_forgetting(self, user_id: str = None):
+        try:
+            count = self.collection.count()
+            if count == 0:
+                return
+
+            results = self.collection.get(include=["metadatas"])
+            metadatas = results.get("metadatas", [])
+            ids = results.get("ids", [])
+
+            ids_to_delete = []
+            for i, meta in enumerate(metadatas):
+                if meta is None:
+                    continue
+                if meta.get("type") == "leccion_de_ingenieria":
+                    continue
+                    
+                synaptic_strength = meta.get("synaptic_strength", 1.0)
+                importance = meta.get("importance", 0.5)
+                
+                # Escudo absoluto
+                if importance >= 0.8:
+                    continue
+                
+                # Umbral dinámico
+                threshold = 0.05 * (1.5 - importance)
+                if synaptic_strength < threshold:
+                    ids_to_delete.append(ids[i])
+
+            if ids_to_delete:
+                self.collection.delete(ids=ids_to_delete)
+                print(f"   [Olvido] ChromaDB: {len(ids_to_delete)} vectores eliminados.")
+        except Exception as e:
+            print(f"   [!] Error en olvido activo ChromaDB: {e}")
+
     # ============================================
-    # Vector de Dirección Narrativa
+    # VECTOR DE DIRECCIÓN NARRATIVA
     # ============================================
 
     def _update_narrative_direction(self, content: str):
-        """Alpha dinámico según densidad de información del estímulo."""
         emb = self._get_embedding(content)
         if emb is None:
             return
@@ -244,10 +320,14 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
         emb_arr = np.array(emb)
         emb_arr = emb_arr / np.linalg.norm(emb_arr)
 
-        # Alpha dinámico: 0.15-0.25 según longitud del contenido
-        # Más largo = más informativo = mayor peso
         alpha = min(0.25, max(0.15, len(content) / 2000.0))
-
+        
+        # Damping: si el nuevo embedding es muy distinto, reducir alpha
+        if self._narrative_direction is not None:
+            angular_distance = 1.0 - float(np.dot(emb_arr, self._narrative_direction))
+            if angular_distance > 0.5:  # Cambio brusco de tema
+                alpha *= 0.3  # Resistencia al cambio (damping γ≈0.85 equivalente)
+        
         if self._narrative_direction is None:
             self._narrative_direction = emb_arr
         else:
@@ -257,83 +337,309 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
             self._narrative_direction = self._narrative_direction / np.linalg.norm(self._narrative_direction)
 
     def _blend_query(self, query: str) -> str:
-        """Combina la query actual con el Vector de Dirección Narrativa."""
         if self._narrative_direction is None:
             return query
         try:
             query_emb = self._get_embedding(query)
             if query_emb is None:
                 return query
-            # Promedio: 70% query actual, 30% dirección narrativa
             blended = np.array(query_emb) * 0.7 + self._narrative_direction * 0.3
-            # Convertir de vuelta a texto aproximado no es posible,
-            # pero podemos usar la query original enriquecida con contexto
             return f"{query} [contexto narrativo]"
         except Exception:
             return query
 
     def _get_embedding(self, text: str) -> Optional[list]:
+        """Usa el mismo modelo multilingüe que el Temporal Focus."""
         try:
-            from chromadb.utils import embedding_functions
-            ef = embedding_functions.DefaultEmbeddingFunction()
+            ef = _get_embedding_function()
             return ef([text])[0]
         except Exception:
             return None
+    # ============================================
+    # MEMORIA SEMÁNTICA (Papers, teoría)
+    # ============================================
 
-    def active_forgetting(self, user_id: str = None):
-        """Olvido activo: elimina vectores con fuerza sináptica insignificante."""
+    def store_semantic(self, content: str, metadata: dict = None):
+        document_id = str(uuid.uuid4())
+        base_metadata = {
+            "timestamp": datetime.now().isoformat(),
+            "source": "nexus_world",
+            "type": "empirical_fact",
+            "confidence_score": 1.0,
+            "importance": 0.7,
+        }
+        if metadata:
+            base_metadata.update(metadata)
+        self.collection.add(
+            documents=[content],
+            metadatas=[self._sanitize_meta(base_metadata)],
+            ids=[document_id],
+        )
+
+        return document_id
+
+    def query_semantic(self, query: str, n_results: int = 5) -> list:
         try:
-            count = self.collection.count()
-            if count == 0:
-                return
+            results = self.semantic_collection.query(query_texts=[query], n_results=n_results)
+            docs = results.get("documents", [[]])[0]
+            metas = results.get("metadatas", [[]])[0]
+            return [{"content": d, "metadata": m} for d, m in zip(docs, metas)]
+        except Exception:
+            return []
 
-            # Obtener todos los metadatos
-            results = self.collection.get(include=["metadatas"])
-            metadatas = results.get("metadatas", [])
+    # ============================================
+    # MEMORIA PROCEDURAL (Código, APIs, comandos)
+    # ============================================
+
+    def index_procedural(self, code_reader):
+        code_reader.index_codebase()
+        try:
+            existing = self.procedural_collection.get(include=[])
+            if existing.get("ids"):
+                self.procedural_collection.delete(ids=existing["ids"])
+        except Exception:
+            pass
+        
+        indexed = 0
+        for file_path, file_data in code_reader.index.items():
+            content = file_data["content"]
+            imports = file_data.get("imports", [])
+            fragments = self._split_code_into_fragments(content)
+            for frag in fragments:
+                self.procedural_collection.add(
+                    documents=[frag["code"]],
+                    metadatas=[{
+                        "file": file_path,
+                        "class": frag.get("class", ""),
+                        "function": frag.get("function", ""),
+                        "line_start": frag["line_start"],
+                        "line_end": frag["line_end"],
+                        "dependencies": ", ".join(imports),
+                        "type": "procedural_fragment",
+                        "importance": 0.6,
+                        "timestamp": datetime.now().isoformat(),
+                    }],
+                    ids=[f"{file_path}:{frag['line_start']}-{frag['line_end']}"],
+                )
+                indexed += 1
+        print(f"   [ProceduralIndex] {indexed} fragmentos indexados.")
+        return indexed
+
+    def query_procedural(self, query: str, file_filter: str = None, function_filter: str = None, n_results: int = 5) -> list:
+        where = {}
+        if file_filter:
+            where["file"] = file_filter
+        if function_filter:
+            where["function"] = function_filter
+        try:
+            if where:
+                results = self.procedural_collection.query(
+                    query_texts=[query], n_results=n_results, where=where
+                )
+            else:
+                results = self.procedural_collection.query(
+                    query_texts=[query], n_results=n_results
+                )
+            fragments = []
+            docs = results.get("documents", [[]])[0]
+            metas = results.get("metadatas", [[]])[0]
+            for doc, meta in zip(docs, metas):
+                fragments.append({
+                    "code": doc,
+                    "file": meta.get("file", ""),
+                    "class": meta.get("class", ""),
+                    "function": meta.get("function", ""),
+                    "line_range": f"{meta.get('line_start', '?')}-{meta.get('line_end', '?')}",
+                })
+            return fragments
+        except Exception as e:
+            print(f"   [!] Error en query_procedural: {e}")
+            return []
+
+    def _split_code_into_fragments(self, content: str) -> list:
+        lines = content.split('\n')
+        fragments = []
+        current, current_start, current_class, current_function = [], 1, "", ""
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith('class '):
+                if current and len('\n'.join(current)) > 500:
+                    fragments.append({"code": '\n'.join(current), "line_start": current_start, "line_end": i-1, "class": current_class, "function": current_function})
+                    current = []
+                current_class = stripped.split('class ')[1].split('(')[0].split(':')[0].strip()
+                current_function, current_start = "", i
+                current.append(line)
+            elif stripped.startswith('def '):
+                if current and len('\n'.join(current)) > 500:
+                    fragments.append({"code": '\n'.join(current), "line_start": current_start, "line_end": i-1, "class": current_class, "function": current_function})
+                    current, current_start = [line], i
+                else:
+                    current.append(line)
+                current_function = stripped.split('def ')[1].split('(')[0].strip()
+            else:
+                current.append(line)
+                if len('\n'.join(current)) > 4000:
+                    fragments.append({"code": '\n'.join(current), "line_start": current_start, "line_end": i, "class": current_class, "function": current_function})
+                    current, current_start = [], i+1
+        if current:
+            fragments.append({"code": '\n'.join(current), "line_start": current_start, "line_end": len(lines), "class": current_class, "function": current_function})
+        return fragments
+
+    def _sanitize_meta(self, meta: dict) -> dict:
+        clean = {}
+        for key, value in meta.items():
+            if value is None:
+                clean[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
+                clean[key] = value
+            else:
+                clean[key] = str(value)
+        return clean
+
+    def _sanitize_meta(self, meta: dict) -> dict:
+        clean = {}
+        for key, value in meta.items():
+            if value is None:
+                clean[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
+                clean[key] = value
+            else:
+                clean[key] = str(value)
+        return clean
+
+    def store_external_knowledge(self, snippets: list, query: str, llm=None) -> str:
+        """
+        Almacena conocimiento externo en working_buffer con validación endógena.
+        
+        Filtro 1: Triangulación de fuentes (¿coinciden entre sí?)
+        Filtro 2: Contraste con entorno local (¿es compatible con Sibelium?)
+        
+        Returns: síntesis validada o string vacío si no pasa filtros.
+        """
+        if not snippets:
+            return ""
+        
+        # Filtro 1: Triangulación - comparar snippets entre sí
+        if len(snippets) >= 2:
+            # Buscar términos coincidentes entre fuentes
+            common_terms = set()
+            words1 = set(snippets[0].lower().split())
+            for s in snippets[1:]:
+                words2 = set(s.lower().split())
+                common = words1 & words2
+                if len(common) < 5:  # Menos de 5 palabras en común = fuentes contradictorias
+                    return ""  # Descartar por incoherencia
+        
+        # Guardar en working_buffer (no en semantic_library aún)
+        content = f"[External] Query: {query}\nSources: {len(snippets)}\n" + " | ".join(snippets[:3])
+        doc_id = str(uuid.uuid4())
+        
+        self.working_buffer.add(
+            documents=[content[:1000]],
+            metadatas=[{
+                "source": "web_search",
+                "type": "pending_validation",
+                "query": query[:100],
+                "utility_score": 0.0,
+                "validated": False,
+                "timestamp": datetime.now().isoformat(),
+                "importance": 0.3,  # Baja importancia hasta validar
+            }],
+            ids=[doc_id],
+        )
+        
+        return content
+
+    def validate_and_promote(self):
+        """
+        Evalúa entradas en working_buffer.
+        Promueve a semantic_library si utility_score > umbral o pasaron auto-examen.
+        """
+        try:
+            results = self.working_buffer.get(include=["metadatas", "documents"])
+            docs = results.get("documents", [])
+            metas = results.get("metadatas", [])
             ids = results.get("ids", [])
-
-            ids_to_delete = []
-            for i, meta in enumerate(metadatas):
+            
+            ids_to_promote = []
+            ids_to_prune = []
+            
+            for i, (doc, meta) in enumerate(zip(docs, metas)):
                 if meta is None:
                     continue
-                # Verificar si es una lección de ingeniería antigua sin reutilización
-                if meta.get("type") == "leccion_de_ingenieria":
-                    # Las lecciones de ingeniería se borran después de 30 días
-                    # (no tenemos timestamp en metadata, así que usamos heurística)
-                    continue
-                # Si no tiene metadatos de fuerza, conservar
-                if "synaptic_strength" not in meta:
-                    continue
-                if meta.get("synaptic_strength", 1.0) < 0.05:
-                    ids_to_delete.append(ids[i])
-
-            if ids_to_delete:
-                self.collection.delete(ids=ids_to_delete)
-                print(f"   [Olvido] ChromaDB: {len(ids_to_delete)} vectores eliminados.")
+                
+                utility = meta.get("utility_score", 0.0)
+                validated = meta.get("validated", False)
+                
+                if utility > 0.6 or validated:
+                    # Promover a semantic_library
+                    self.semantic_collection.add(
+                        documents=[doc[:1000]],
+                        metadatas=[{
+                            **meta,
+                            "type": "external_knowledge",
+                            "source": "web_search_validated",
+                            "importance": 0.7,
+                        }],
+                        ids=[f"promoted_{ids[i]}"],
+                    )
+                    ids_to_promote.append(ids[i])
+                    print(f"   [WorkingBuffer] Promovido a semantic_library: {meta.get('query', '?')[:60]}")
+                else:
+                    # Podar entradas no usadas tras 24h
+                    ids_to_prune.append(ids[i])
+            
+            if ids_to_promote:
+                self.working_buffer.delete(ids=ids_to_promote)
+            if ids_to_prune:
+                self.working_buffer.delete(ids=ids_to_prune)
+                
         except Exception as e:
-            print(f"   [!] Error en olvido activo ChromaDB: {e}")
+            print(f"   [!] Error en validate_and_promote: {e}")
+
+    def calculate_query_confidence(self, query: str) -> float:
+        """Evalúa si hay datos relevantes para una query en las colecciones."""
+        import re
+        
+        sem_results = self.query_semantic(query[:300], n_results=3)
+        proc_results = self.query_procedural(query[:300], n_results=3)
+        
+        query_terms = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', query.lower()))
+        
+        sem_relevant = 0
+        for r in sem_results:
+            content_terms = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', r.get("content", "").lower()))
+            if len(query_terms & content_terms) >= 3:
+                sem_relevant += 1
+        
+        proc_relevant = 0
+        for r in proc_results:
+            code_terms = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', r.get("code", "").lower()))
+            if len(query_terms & code_terms) >= 3:
+                proc_relevant += 1
+        
+        total = sem_relevant + proc_relevant
+        
+        if total == 0: return 0.1
+        elif total >= 3: return 0.8
+        elif total >= 1: return 0.5
+        return 0.3
 
 # ============================================
 # TEMPORAL FOCUS (Sistema de CPFdl Virtual)
 # ============================================
 
-import math
-import numpy as np
-
-# Anclas temporales refinadas (español, compatibles con modelo multilingüe)
 TEMPORAL_ANCHORS = {
     "remote": "Pasado remoto. Archivo histórico profundo. Origen primigenio, inicios remotos, memorias antiguas, eventos consolidados en el tiempo lejano.",
     "recent": "Pasado inmediato. Memoria de trabajo reciente. Actualidad, sucesos de última hora, frescura temporal, recién ocurrido, contexto del ahora mismo.",
     "neutral": "Línea temporal indefinida. Conceptos abstractos, conocimiento general, datos atemporales, hechos permanentes sin coordenadas cronológicas.",
 }
 
-# Embeddings cacheados de las anclas
 _temporal_anchor_embeddings = {}
 _embedding_function = None
 
 
 def _get_embedding_function():
-    """Singleton de la función de embeddings."""
     global _embedding_function
     if _embedding_function is None:
         from chromadb.utils import embedding_functions
@@ -342,7 +648,6 @@ def _get_embedding_function():
 
 
 def _get_temporal_anchor_embedding(focus: str):
-    """Cachea y retorna el embedding de un ancla temporal."""
     if focus not in _temporal_anchor_embeddings:
         ef = _get_embedding_function()
         emb = ef([TEMPORAL_ANCHORS[focus]])[0]
@@ -351,13 +656,6 @@ def _get_temporal_anchor_embedding(focus: str):
 
 
 def determinar_temporal_focus(user_message: str) -> str:
-    """
-    Determina la orientación temporal usando amplificación de contraste
-    (modulación dopaminérgica de ganancia prefrontal).
-    """
-    import math
-    import numpy as np
-    
     try:
         ef = _get_embedding_function()
         msg_emb = np.array(ef([user_message])[0])
@@ -371,7 +669,6 @@ def determinar_temporal_focus(user_message: str) -> str:
         sim_recent = float(np.dot(msg_emb, recent_emb))
         sim_neutral = float(np.dot(msg_emb, neutral_emb))
         
-        # Ganancia dopaminérgica (k=4 estira diferencias en zona alta)
         k = 4.0
         e_remote = math.exp(sim_remote * k)
         e_recent = math.exp(sim_recent * k)
@@ -382,10 +679,8 @@ def determinar_temporal_focus(user_message: str) -> str:
         p_recent = e_recent / total
         p_neutral = e_neutral / total
         
-        # Reemplazar UMBRAL_PROB = 0.10 por:
         umbral_dinamico = 0.05 * (1.0 + sum(-p * math.log(p) for p in [p_remote, p_recent, p_neutral]))
 
-        # Y la condición:
         if p_remote - p_recent > umbral_dinamico and p_remote - p_neutral > umbral_dinamico:
             return "remote"
         elif p_recent - p_remote > umbral_dinamico and p_recent - p_neutral > umbral_dinamico:
@@ -397,14 +692,7 @@ def determinar_temporal_focus(user_message: str) -> str:
 
 
 def calcular_recencia_dinamica(hours_elapsed: float, focus: str) -> float:
-    """
-    Calcula la recencia dinámica según el foco temporal.
-    - recent: decaimiento exponencial (tau=48h)
-    - remote: escalado logarítmico (consolidación a largo plazo)
-    - neutral: 0.0 (anula el factor temporal)
-    """
     t = max(0.1, hours_elapsed)
-    
     if focus == "recent":
         return math.exp(-t / 48.0)
     elif focus == "remote":
@@ -413,15 +701,7 @@ def calcular_recencia_dinamica(hours_elapsed: float, focus: str) -> float:
         return 0.0
 
 
-def calcular_score_trimetrico(
-    similitud: float,
-    hours_elapsed: float,
-    importancia: float,
-    temporal_focus: str = "recent"
-) -> float:
-    """
-    Puntuación trimétrica modulada por foco temporal.
-    """
+def calcular_score_trimetrico(similitud: float, hours_elapsed: float, importancia: float, temporal_focus: str = "recent") -> float:
     w_sim = 0.5
     w_rec = 0.3
     w_imp = 0.2
@@ -433,3 +713,77 @@ def calcular_score_trimetrico(
         w_rec = 0.0
     
     return (similitud * w_sim) + (recencia_dinamica * w_rec) + (importancia * w_imp)
+
+
+# ============================================
+# INTEGRACIÓN CON EPISODICMEMORY (Monkey Patch)
+# ============================================
+
+def patch_episodic_memory_get_relevant(episodic_memory_instance):
+    original_get_relevant = episodic_memory_instance.get_relevant
+
+    def extended_get_relevant(query, user_id=None, limit=5, include_ids=False, **kwargs):
+        from datetime import datetime
+        
+        count = episodic_memory_instance.collection.count()
+        if count == 0:
+            return []
+
+        search_query = episodic_memory_instance._blend_query(query)
+
+        try:
+            if user_id:
+                results = episodic_memory_instance.collection.query(
+                    query_texts=[search_query],
+                    n_results=min(limit * 3, count),
+                    where={"user_id": user_id},
+                )
+            else:
+                results = episodic_memory_instance.collection.query(
+                    query_texts=[search_query],
+                    n_results=min(limit * 3, count),
+                )
+
+            documents = results.get("documents", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+            metadatas = results.get("metadatas", [[]])[0]
+            ids = results.get("ids", [[]])[0]
+
+            if not documents:
+                return []
+
+            scored = []
+            now = datetime.now()
+
+            for i, doc in enumerate(documents):
+                similitud = 1.0 - distances[i] if i < len(distances) else 0.5
+                meta = metadatas[i] if i < len(metadatas) else {}
+                timestamp_str = meta.get("timestamp", "")
+                hours_elapsed = 168.0
+                if timestamp_str:
+                    try:
+                        ts = datetime.fromisoformat(timestamp_str)
+                        hours_elapsed = (now - ts).total_seconds() / 3600.0
+                    except Exception:
+                        pass
+                importancia = meta.get("importance", 0.5)
+                temporal_focus = kwargs.get("temporal_focus", "recent")
+                puntaje = calcular_score_trimetrico(similitud=similitud, hours_elapsed=hours_elapsed, importancia=importancia, temporal_focus=temporal_focus)
+                doc_id = ids[i] if i < len(ids) else ""
+                scored.append((puntaje, doc, doc_id, similitud, distances[i]))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            if include_ids:
+                return [(doc, doc_id, score, distance) for score, doc, doc_id, _, distance in scored[:limit]]
+            else:
+                return [doc for _, doc, _, _, _ in scored[:limit]]
+
+        except Exception as e:
+            print(f"❌ Error en get_relevant: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    episodic_memory_instance.get_relevant = extended_get_relevant
+    return episodic_memory_instance

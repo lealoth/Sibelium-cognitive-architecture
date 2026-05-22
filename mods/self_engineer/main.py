@@ -12,6 +12,19 @@ def setup(flow_manager):
     engineer = SelfEngineer(flow_manager, base_dir)
     executor = CodeExecutor()
     
+    # Registrar sandbox en EnvironmentController universal
+    from core.environment_controller import controller, ActionResult
+    def execute_python_sandbox(params):
+        result = executor.execute(params.get("code", ""))
+        return ActionResult(
+            success=result.get("success", False),
+            output=result.get("stdout", ""),
+            error=result.get("stderr", ""),
+            error_type=result.get("error_type", ""),
+            entropy_delta=-0.5 if result.get("success") else 0.3
+        )
+    controller.register_environment("python_sandbox", execute_python_sandbox)
+    
     # Registrar propósitos del mod
     if hasattr(flow_manager.llm, 'register_mod_purpose'):
         flow_manager.llm.register_mod_purpose("premium", "analizar_codigo")
@@ -83,7 +96,7 @@ def setup(flow_manager):
                     fm._team_channel.send(
                         sender="Ada",
                         receiver="Nexus",
-                        message=f"Análisis de {latest['file']}:\n{latest['analysis'][:500]}",
+                        message=f"Análisis de {latest['file']}:\n{latest['analysis']}",
                         msg_type="code_review"
                     )
                     print(f"   [SelfEngineer] Propuesta enviada a Nexus.")
@@ -100,7 +113,7 @@ def setup(flow_manager):
                             f"""Eres una ingeniera senior revisando el trabajo de una ingeniera junior.
 
     Propuesta técnica:
-    {latest['analysis'][:1000]}
+    {latest['analysis']}
 
     Evalúa:
     1. ¿Es técnicamente correcta?
@@ -110,7 +123,7 @@ def setup(flow_manager):
     Responde con:
     DECISIÓN: [APROBAR / RECHAZAR / REFINAR]
     FEEDBACK: [breve]""",
-                            temperature=0.2, max_tokens=200, purpose="evaluar_analisis"
+                            temperature=0.2, max_tokens=1000, purpose="evaluar_analisis"
                         )
                         latest["evaluated"] = True
                         latest["self_review"] = evaluation
@@ -156,15 +169,6 @@ def setup(flow_manager):
                                 lessons
                             )
                             fm.self_engineer._save_proposals()
-                            
-                            lessons = fm.self_engineer._get_engineering_lessons(latest["file"])
-                            latest["analysis"] = fm.self_engineer._format_proposal(
-                                latest["file"],
-                                latest["analysis"],
-                                test_result,
-                                lessons
-                            )
-                            fm.self_engineer._save_proposals()
 
                             from core.flow.flow_stream import ThoughtItem
                             if test_result["success"] is None:
@@ -195,7 +199,7 @@ def setup(flow_manager):
                                 fb = test_result["cerebellar_feedback"]
                                 lesson = (
                                     f"[Lección] Error {fb.get('error_type')} en línea {fb.get('linea_exacta')}: "
-                                    f"{fb.get('sugerencia_sinaptica', '')[:150]}"
+                                    f"{fb.get('sugerencia_sinaptica', '')}"
                                 )
                                 fm.stream.add_thought(ThoughtItem(
                                     content=lesson,
@@ -220,9 +224,28 @@ def setup(flow_manager):
         except Exception as e:
             print(f"   [!] Error en ciclo de automejora: {e}")
 
+            # Registrar
+    flow_manager._mod_hooks["on_startup"].append(on_startup)
+    flow_manager._mod_hooks["on_slow_tick"].append(on_slow_tick)
+    
+    # Guardar referencias para teardown
+    flow_manager._self_engineer_hooks = {
+        "on_startup": on_startup,
+        "on_slow_tick": on_slow_tick,
+    }
+    
+    return engineer  # Devolver instancia para que loader la guarde
+
 
 def teardown(flow_manager):
+    hooks = getattr(flow_manager, '_self_engineer_hooks', {})
+    for hook_name, hook_fn in hooks.items():
+        if hook_name in flow_manager._mod_hooks and hook_fn in flow_manager._mod_hooks[hook_name]:
+            flow_manager._mod_hooks[hook_name].remove(hook_fn)
+    
     flow_manager.code_reader = None
     flow_manager.self_engineer = None
     flow_manager.code_executor = None
+    if hasattr(flow_manager, '_self_engineer_hooks'):
+        del flow_manager._self_engineer_hooks
     print("   [SelfEngineer] Disabled.")

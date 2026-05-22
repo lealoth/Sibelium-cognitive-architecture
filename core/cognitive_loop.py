@@ -28,8 +28,6 @@ class CognitiveLoop:
         self.interaction_count_path = self.user_dir / "interaction_count.json"
         self.conversation_summary = ""
 
-        self.short_term_history = []
-
         # Memorias (UserMemory recibe user_id)
         self.episodic_memory = EpisodicMemory()
         self.user_memory = UserMemory(user_id=user_id)
@@ -48,6 +46,16 @@ class CognitiveLoop:
         if start_flow:
             self.flow_manager.start()
 
+        # Cargar short_term_history desde history.json
+        self.short_term_history = []
+        if self.last_history:
+            # Tomar los últimos 8 mensajes (4 intercambios)
+            for entry in self.last_history[-8:]:
+                self.short_term_history.append({
+                    "role": entry.get("role", "user"),
+                    "text": entry.get("text", "")[:200]
+                })
+
     # ============================================
     # PERSISTENCIA
     # ============================================
@@ -55,7 +63,7 @@ class CognitiveLoop:
     # Nuevo método:
     def _get_short_term_history(self, persona_name: str, user_name: str) -> str:
         if not self.short_term_history:
-            return "[Conversación recién iniciada. Primer mensaje.]"
+            return "[Conversación recién iniciada.]"
         lines = []
         for entry in self.short_term_history[-8:]:
             role = persona_name if entry["role"] == "assistant" else user_name
@@ -67,7 +75,6 @@ class CognitiveLoop:
         self.short_term_history.append({"role": "assistant", "text": response})
         if len(self.short_term_history) > 8:
             self.short_term_history = self.short_term_history[-8:]
-        print(f"   [DEBUG] Short term history actualizado: {len(self.short_term_history)} entradas")
 
     def _load_history_from_disk(self):
         try:
@@ -218,6 +225,10 @@ class CognitiveLoop:
                 entropy = self.flow_manager._get_context_entropy()
                 stress = 1.0 - entropy
                 self.flow_manager.llm.set_cognitive_stress(stress)
+
+            self._update_short_term_history(message, response)
+            outcome = self.evaluate_conversational_outcome(message, response)
+            self.consolidate_conversational_learning(message, response, outcome)
 
         except Exception as e:
             print(f"⚠️ Error en post-procesamiento diferido: {e}")
@@ -561,3 +572,169 @@ Sé específico y personal. No repitas frases anteriores.
             self.conversation_summary += f" [Tags: {tags.strip()}]"
         except:
             pass
+
+    def evaluate_conversational_outcome(self, user_message: str, assistant_response: str) -> dict:
+        """Analizador de Recompensa Conversacional basado en embeddings."""
+        try:
+            msg_emb = self.flow_manager.stream._get_embedding(user_message)
+            if msg_emb is None:
+                return {"outcome": "implicit_success", "feedback": "Sin señal.", "importance": 0.4}
+            
+            import numpy as np
+            msg_arr = np.array(msg_emb)
+            msg_norm = msg_arr / max(np.linalg.norm(msg_arr), 1e-8)
+            
+            # Vectores de sentimiento (multilingües)
+            positive_anchor = self.flow_manager.stream._get_embedding(
+                "excelente buen trabajo correcto gracias funciona perfecto bien hecho exactly great thanks perfect"
+            )
+            negative_anchor = self.flow_manager.stream._get_embedding(
+                "mal error no funciona equivocado incorrecto no sirve pésimo wrong bad incorrect"
+            )
+            
+            if positive_anchor and negative_anchor:
+                pos_arr = np.array(positive_anchor)
+                neg_arr = np.array(negative_anchor)
+                pos_norm = pos_arr / max(np.linalg.norm(pos_arr), 1e-8)
+                neg_norm = neg_arr / max(np.linalg.norm(neg_arr), 1e-8)
+                
+                sim_positive = float(np.dot(msg_norm, pos_norm))
+                sim_negative = float(np.dot(msg_norm, neg_norm))
+                
+                if sim_negative > sim_positive and sim_negative > 0.5:
+                    return {"outcome": "prediction_error", "feedback": "El usuario rechazó la respuesta.", "importance": 0.7}
+                elif sim_positive > sim_negative and sim_positive > 0.5:
+                    return {"outcome": "success", "feedback": "Respuesta bien recibida.", "importance": 0.6}
+            
+            # Si no hay señal clara
+            is_correction = any(ind in user_message.lower() for ind in ["no es", "corrige", "en realidad"])
+            if is_correction:
+                return {"outcome": "prediction_error", "feedback": "Corrección detectada.", "importance": 0.7}
+            
+            return {"outcome": "implicit_success", "feedback": "Continuidad sin señal clara.", "importance": 0.4}
+        except Exception:
+            return {"outcome": "implicit_success", "feedback": "Error en evaluación.", "importance": 0.4}
+
+    def consolidate_conversational_learning(self, user_message: str, assistant_response: str, outcome: dict):
+        """Consolida aprendizaje conversacional. Solo éxitos van a ChromaDB."""
+        if outcome["outcome"] == "prediction_error":
+            from core.flow.flow_stream import ThoughtItem
+            self.flow_manager.stream.add_thought(ThoughtItem(
+                content=f"[Error de predicción] {outcome['feedback'][:200]}",
+                thought_type="error_feedback", priority=0.85, source="conversational_learning"
+            ))
+            return
+        
+        learning_content = f"APRENDIZAJE CONVERSACIONAL\nUsuario: {user_message[:300]}\nRespuesta: {assistant_response[:300]}\nFeedback: {outcome['feedback']}"
+        try:
+            self.episodic_memory.store_interaction(
+                user_message="[Aprendizaje conversacional]",
+                assistant_response=learning_content,
+                user_id=self.user_id,
+                metadata={
+                    "source": "conversational_learning",
+                    "type": "validated_interaction",
+                    "outcome": outcome.get("outcome", ""),
+                    "importance": outcome.get("importance", 0.5),
+                }
+            )
+        except Exception as e:
+            print(f"⚠️ Error guardando en memoria episódica: {e}")
+
+    def process_action_outcome(self, action_result, context_intent: str, source: str = "generic"):
+        """
+        Procesa el resultado de cualquier acción (conversación, código, dibujo, etc.)
+        usando el EnvironmentController universal.
+        """
+        from core.environment_controller import controller
+        
+        outcome = controller.evaluate_outcome(action_result, context_intent)
+        
+        if outcome == "DOPAMINERGIC_REWARD":
+            # Consolidar en episodic_memory
+            self.episodic_memory.store_interaction(
+                user_message=f"[Acción validada] {source}",
+                assistant_response=f"Resultado exitoso: {str(action_result.output)[:500]}",
+                user_id=self.user_id,
+                metadata={
+                    "source": "action_learning",
+                    "type": "validated_action",
+                    "environment": source,
+                    "success": True,
+                    "importance": 0.7,
+                }
+            )
+        elif outcome in ("PREDICTION_ERROR", "CRITICAL_FAILURE"):
+            # Inyectar en working_memory, NO guardar en ChromaDB
+            from core.flow.flow_stream import ThoughtItem
+            self.flow_manager.stream.add_thought(ThoughtItem(
+                content=f"[Error] {source}: {action_result.error[:200]}",
+                thought_type="error_feedback",
+                priority=0.85,
+                source="action_learning"
+            ))
+
+
+    def _distill_to_semantic(self):
+        """
+        Filtro de Destilación (Sistema #35).
+        Promueve aprendizajes de episodic_memory a semantic_library
+        solo si el mismo principio aparece en 3+ contextos diferentes.
+        """
+        try:
+            # Buscar aprendizajes validados recientes
+            results = self.episodic_memory.collection.query(
+                query_texts=["aprendizaje validado"],
+                n_results=20,
+                where={"type": "validated_learning"}
+            )
+            docs = results.get("documents", [[]])[0]
+            metas = results.get("metadatas", [[]])[0]
+            
+            if len(docs) < 3:
+                return
+            
+            # Agrupar por similitud semántica
+            embeddings = []
+            for doc in docs:
+                emb = self.flow_manager.stream._get_embedding(doc[:500])
+                if emb:
+                    embeddings.append(emb)
+            
+            if len(embeddings) < 3:
+                return
+            
+            import numpy as np
+            
+            # Buscar grupos de 3+ aprendizajes con alta similitud entre sí
+            for i in range(len(embeddings) - 2):
+                group = [i]
+                for j in range(i + 1, len(embeddings)):
+                    a = np.array(embeddings[i]) / max(np.linalg.norm(embeddings[i]), 1e-8)
+                    b = np.array(embeddings[j]) / max(np.linalg.norm(embeddings[j]), 1e-8)
+                    sim = np.dot(a, b)
+                    if sim > 0.85:  # Mismo principio abstracto
+                        group.append(j)
+                
+                if len(group) >= 3:
+                    # Verificar que son de contextos diferentes (archivos distintos)
+                    files = [metas[idx].get("file_affected", "") for idx in group if idx < len(metas)]
+                    unique_files = set(files)
+                    
+                    if len(unique_files) >= 2:  # Al menos 2 archivos diferentes
+                        # Promover a semantic_library
+                        principle = docs[group[0]][:600]
+                        self.episodic_memory.store_semantic(
+                            content=f"[Principio validado multi-contexto]\n{principle}",
+                            metadata={
+                                "source": "distillation",
+                                "type": "abstract_principle",
+                                "evidence_count": len(group),
+                                "source_files": ", ".join(unique_files),
+                                "importance": 0.85,
+                            }
+                        )
+                        print(f"   [Destilación] Principio promovido a semantic_library ({len(group)} evidencias, {len(unique_files)} archivos).")
+                        return
+        except Exception as e:
+            print(f"   [!] Error en destilación: {e}")

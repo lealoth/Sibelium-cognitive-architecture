@@ -4,6 +4,7 @@ from core.flow.flow_stream import ThoughtItem
 from core.llm import LLMModel
 from config import IDIOMA
 from core.flow.temperature_optimizer import calcular_temperatura
+import numpy as np
 
 class FlowThoughts:
     """Módulo de pensamientos: reflexión, curiosidad, simulación, enriquecimiento."""
@@ -15,7 +16,7 @@ class FlowThoughts:
         "deep_reflection": 450,
         "curiosity": 240,
         "simulation": 1200,
-        "prospection": 600,  # Nueva: prospección cada 10 min
+        "prospection": 600,  
         "web_search": 750,
         "proactive_check": 120,
     }
@@ -35,7 +36,7 @@ class FlowThoughts:
         backstory = persona.get("backstory", "")
 
         prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+Eres el núcleo cognitivo de {persona.get('name', '')}.
 {personality_desc}
 Tu tarea actual es el MONÓLOGO INTERNO.
 Aquí no hablas con el usuario; procesas tus propios sesgos e ideas en silencio.
@@ -66,6 +67,9 @@ Pensamiento:"""
         self.fm.last_thought_time = datetime.now()
         self.fm._store_curiosity(f"[Reflexion] {enriched_thought}")
         self.fm.pattern_extractor.analyze_reflection(enriched_thought)
+
+        self.fm.maintenance._consolidate_reflection(enriched_thought, "reflection")
+
     
     def _generate_curiosity(self):
         if self.fm.last_message_time:
@@ -76,31 +80,83 @@ Pensamiento:"""
         active_summary = self.fm.stream.get_all_active_summary()
         thought_rules = self._get_thought_rules()
         
-        persona = self.fm.cognitive_loop.load_persona()
-        name = persona.get("name", "Nexus")
-        personality_desc = persona.get("personality_desc", "")
-        backstory = persona.get("backstory", "")
+        # Rutear el pensamiento interno
+        route = self.fm.interaction._decide_info_needs(active_summary[:300] if active_summary else "reflexión interna")
+        network = route.get("needs", "PERSONAL")
         
-        prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de {name}.
-{backstory if backstory else ''}
-{personality_desc}
-Tu tarea actual es el MONÓLOGO INTERNO.
-Aquí no hablas con el usuario; procesas tus propios sesgos e ideas en silencio.
---- END IDENTITY ---
+        # Obtener contexto según la red
+        if network == "WORK":
+            replay_context = self._get_replay_context(active_summary, prefer_code=True)
+        elif network == "EXTERNAL":
+            self._add_scratchpad_intention(active_summary)
+            replay_context = "[Intención externa registrada. No ejecutar ahora.]"
+        else:
+            replay_context = self._get_personal_context()
+        
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
 
---- ACTIVE THOUGHTS ---
-{active_summary}
---- END ACTIVE ---
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
 
-{thought_rules}
+        # Misma lógica de intención + dominio usando active_summary como mensaje
+        opt_anchor = self.fm.stream._get_embedding(
+            "optimize improve fix solve reduce enhance configure update upgrade accelerate"
+        )
+        insp_anchor = self.fm.stream._get_embedding(
+            "explain describe how does work what is list show find query analyze"
+        )
 
---- DIRECTIVE ---
-Genera una pregunta o tema de exploración basado en tus pensamientos activos (una frase).
-Responde solo en {IDIOMA}.
---- END DIRECTIVE ---
+        domain_keywords = self.fm.domain_filter.get_keywords()[:10] if hasattr(self.fm, 'domain_filter') else []
+        domain_str = " ".join(domain_keywords) if domain_keywords else ""
+        domain_anchor = self.fm.stream._get_embedding(domain_str) if domain_str else None
 
-Pensamiento:"""
+        query_text = active_summary[:300] if active_summary else replay_context[:300]
+
+        if opt_anchor and insp_anchor:
+            query_emb = self.fm.stream._get_embedding(query_text)
+            query_arr = np.array(query_emb) / np.linalg.norm(query_emb)
+            
+            opt_arr = np.array(opt_anchor) / np.linalg.norm(opt_anchor)
+            insp_arr = np.array(insp_anchor) / np.linalg.norm(insp_anchor)
+            
+            sim_opt = float(np.dot(query_arr, opt_arr))
+            sim_insp = float(np.dot(query_arr, insp_arr))
+            
+            is_optimization_intent = (sim_opt > sim_insp) and (sim_opt > 0.38)
+            
+            if domain_anchor is not None:
+                domain_arr = np.array(domain_anchor) / np.linalg.norm(domain_anchor)
+                sim_domain = float(np.dot(query_arr, domain_arr))
+                in_domain = sim_domain > 0.45
+            else:
+                in_domain = True
+            
+            force_web_search = is_optimization_intent and in_domain
+        else:
+            force_web_search = False
+
+        # Decisión final
+        if confidence < 0.45 or force_web_search:
+            web_context = self._fetch_web_for_thought(query_text)
+            if web_context:
+                replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
+
+        prompt = f"""--- HIPPOCAMPAL REPLAY ({network}) ---
+    [ACTIVE THOUGHTS]: {active_summary}
+    {thought_rules}
+    {replay_context if replay_context else '[No context available]'}
+    This is offline mental rehearsal in {network} mode.
+    Generate a speculative reflection appropriate to this mode.
+    Respond in 1 sentence in {IDIOMA}."""
         
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("curiosidad")
@@ -108,108 +164,154 @@ Pensamiento:"""
         enriched_thought = self._enrich_thought_with_context(thought, "curiosity")
         
         self.fm.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="curiosity", priority=0.5, source="internal"))
-        self.fm.last_thought_time = datetime.now()
-        self.fm._store_curiosity(enriched_thought)
+        self.fm.last_thought_time = datetime.now() 
+
+        # Detectar duda epistémica y auto-responder con búsqueda web
+        if "?" in enriched_thought and self.fm.satiety.can_generate("web_search"):
+            self._auto_resolve_doubt(enriched_thought)
+
     
     def _generate_simulation(self):
         active_summary = self.fm.stream.get_all_active_summary()
         self_state = self.fm.cognitive_loop.self_memory.load_state()
         emocion = self_state.get("estado_actual", {}).get("emocion", "neutral")
         thought_rules = self._get_thought_rules()
-        
-        memory_anchor = ""
+
+        # Rutear el pensamiento interno para decidir qué macro-red activar
+        internal_stimulus = active_summary[:300] if active_summary else "reflexión interna"
+        route = self.fm.interaction._decide_info_needs(active_summary[:300] if active_summary else "simulación interna")
+        network = route.get("needs", "PERSONAL")
+
+        if network == "WORK":
+            # Enfocar en código/documentación indexada
+            replay_context = self._get_replay_context(active_summary, prefer_code=True)
+        elif network == "PERSONAL":
+            # Enfocar en identidad y estado interno
+            replay_context = self._get_personal_context()
+        elif network == "EXTERNAL":
+            # Generar intención para el Scratchpad (no ejecutar ahora)
+            self._add_scratchpad_intention(active_summary)
+            replay_context = "[Intención externa registrada para el próximo ciclo activo]"
+        else:
+            replay_context = ""
+
         try:
-            if hasattr(self.fm, 'associative_memory'):
-                results = self.fm.associative_memory.get_relevant_with_neighbors(
-                    query=active_summary[:200],
-                    user_id=self.fm.cognitive_loop.user_id,
-                    limit=2,
-                    max_neighbors_per_memory=3,
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
+
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
+
+        # Misma lógica de intención + dominio usando active_summary como mensaje
+        opt_anchor = self.fm.stream._get_embedding(
+            "optimize improve fix solve reduce enhance configure update upgrade accelerate"
+        )
+        insp_anchor = self.fm.stream._get_embedding(
+            "explain describe how does work what is list show find query analyze"
+        )
+
+        domain_keywords = self.fm.domain_filter.get_keywords()[:10] if hasattr(self.fm, 'domain_filter') else []
+        domain_str = " ".join(domain_keywords) if domain_keywords else ""
+        domain_anchor = self.fm.stream._get_embedding(domain_str) if domain_str else None
+
+        query_text = active_summary[:300] if active_summary else replay_context[:300]
+
+        if opt_anchor and insp_anchor:
+            query_emb = self.fm.stream._get_embedding(query_text)
+            query_arr = np.array(query_emb) / np.linalg.norm(query_emb)
+            
+            opt_arr = np.array(opt_anchor) / np.linalg.norm(opt_anchor)
+            insp_arr = np.array(insp_anchor) / np.linalg.norm(insp_anchor)
+            
+            sim_opt = float(np.dot(query_arr, opt_arr))
+            sim_insp = float(np.dot(query_arr, insp_arr))
+            
+            is_optimization_intent = (sim_opt > sim_insp) and (sim_opt > 0.38)
+            
+            if domain_anchor is not None:
+                domain_arr = np.array(domain_anchor) / np.linalg.norm(domain_anchor)
+                sim_domain = float(np.dot(query_arr, domain_arr))
+                in_domain = sim_domain > 0.45
+            else:
+                in_domain = True
+            
+            force_web_search = is_optimization_intent and in_domain
+        else:
+            force_web_search = False
+
+        # Decisión final
+        if confidence < 0.45 or force_web_search:
+            web_context = self._fetch_web_for_thought(query_text)
+            if web_context:
+                replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
+
+        # Query dinámico basado en el contexto activo
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.query_procedural(active_summary[:300], n_results=3)
+            if results:
+                fragment = results[0]
+                replay_context = (
+                    f"[CODE - {fragment.get('file', '')} ({fragment.get('line_range', '')})]:\n"
+                    f"{fragment.get('code', '')[:600]}"
                 )
+            else:
+                results = episodic.query_semantic(active_summary[:300], n_results=2)
                 if results:
-                    memory_anchor = self.fm.associative_memory.build_context_block(
-                        results, max_total_chars=600, max_neighbor_chars=150
-                    )
+                    replay_context = f"[INDEXED]:\n{results[0].get('content', '')[:600]}"
         except Exception:
             pass
-        persona = self.fm.cognitive_loop.load_persona()
-        personality_desc = persona.get("personality_desc", "")
-        backstory = persona.get("backstory", "")
+        
+        modes = self.fm.archetype.get("simulation_modes", {})
+        modes_text = "\n".join([f"- {k}: {v}" for k, v in modes.items()])
 
-        prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
-Tu tarea actual es SIMULACIÓN INTERNA.
-Aquí no hablas con el usuario; procesas escenarios hipotéticos en silencio.
---- END IDENTITY ---
+        prompt = f"""--- HIPPOCAMPAL REPLAY: MENTAL REHEARSAL ---
+        [ACTIVE THOUGHTS]: {active_summary}
+        [EMOTIONAL STATE]: {emocion}
+        {thought_rules}
+        {replay_context if replay_context else '[No indexed content available for rehearsal]'}
+        This is offline mental rehearsal. Choose ONE approach (2-3 sentences):
+        {modes_text}
 
---- TELEMETRY ---
-- Estado Emocional: {emocion}
-{thought_rules}
---- END TELEMETRY ---
-
---- ACTIVE THOUGHTS ---
-{active_summary}
---- END ACTIVE ---
-
---- MEMORY ---
-{memory_anchor if memory_anchor else '[No hay registros previos para anclar esta simulación.]'}
---- END MEMORY ---
-
---- DIRECTIVE ---
-Elige UNO de estos enfoques y genera un escenario hipotético (2-3 frases):
-- ANTICIPACION: Que podria ocurrir si...?
-- EXPLORACION: Que implicaciones tendria...?
-- OPTIMIZACION: Que proceso o resultado podria mejorarse?
-Basate en la informacion disponible. Responde solo en {IDIOMA}.
---- END DIRECTIVE ---
-
-Pensamiento:"""
+        Respond in {IDIOMA}. Be specific."""
         
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("simulacion")
         thought = self.fm.llm.generate(prompt, temperature=temp, max_tokens=120, purpose="simulacion_fondo")
-        enriched = self._enrich_thought_with_context(thought, "simulation", None)
+        enriched_thought = self._enrich_thought_with_context(thought, "simulation", None)
         
-        # Validación post-generación (sin cambios)
-        try:
-            from core.memory.episodic_memory import EpisodicMemory
-            episodic = EpisodicMemory()
-            resultado = episodic.get_relevant_with_contradiction(
-                enriched, user_id=self.fm.cognitive_loop.user_id, limit=1
-            )
-            veredicto = resultado.get("veredicto", "OK")
-            
-            if veredicto == "ESCALAR_A_GEMINI":
-                print(f"   [Contradiccion] Alucinacion detectada. Escalando a Gemini...")
-                enriched = self._regenerate_with_gemini(
-                    prompt_original=prompt,
-                    recuerdo_real=resultado.get("recuerdo", ""),
-                    active_summary=active_summary,
-                    tipo_tarea="Simulación contrafactual"
-                )
-            elif veredicto == "REGENERAR_LOCAL":
-                print(f"   [Contradiccion] Posible contradiccion. Regenerando en frio...")
-                thought_frio = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=120, purpose="simulacion_fondo")
-                enriched_frio = self._enrich_thought_with_context(thought_frio, "simulation", None)
-                resultado2 = episodic.get_relevant_with_contradiction(
-                    enriched_frio, user_id=self.fm.cognitive_loop.user_id, limit=1
-                )
-                if resultado2.get("veredicto") in ("ESCALAR_A_GEMINI", "REGENERAR_LOCAL"):
-                    enriched = self._regenerate_with_gemini(
-                        prompt_original=prompt,
-                        recuerdo_real=resultado2.get("recuerdo", resultado.get("recuerdo", "")),
-                        active_summary=active_summary,
-                        tipo_tarea="Simulación contrafactual"
-                    )
-                else:
-                    enriched = enriched_frio
-        except Exception as e:
-            print(f"   [!] Error en validacion post-generacion: {e}")
         
-        self.fm.stream.add_thought(ThoughtItem(content=enriched, thought_type="simulation", priority=0.5, source="internal"))
+        self.fm.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="simulation", priority=0.5, source="internal"))
         self.fm.last_thought_time = datetime.now()
-        self.fm._store_curiosity(enriched)
+        self.fm._store_curiosity(enriched_thought)
     
+    def _fetch_web_for_thought(self, query: str) -> str:
+        # Añadir contexto del dominio para desambiguar
+        domain_context = ""
+        if hasattr(self.fm, 'domain_filter'):
+            keywords = self.fm.domain_filter.get_keywords()[:5]
+            if keywords:
+                domain_context = " ".join(keywords)
+        
+        search_query = f"{query} {domain_context}" if domain_context else query
+        
+        try:
+            from ddgs import DDGS
+            results = DDGS().text(search_query[:300], max_results=2)
+            if results:
+                snippets = [r.get("body", "")[:300] for r in results if r.get("body")]
+                return "\n".join(snippets) if snippets else ""
+        except Exception:
+            pass
+        return ""
+
     def _regenerate_with_gemini(self, prompt_original: str, recuerdo_real: str, active_summary: str, tipo_tarea: str) -> str:
         """
         Regenera una simulación desde cero usando Gemini 2.0 Flash con ancla factual.
@@ -358,12 +460,12 @@ Genera un pensamiento enriquecido (1-2 frases). Responde solo en {IDIOMA}.
 
 Pensamiento:"""
             
-            enriched = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="pensamiento_enriquecido")
+            enriched_thought = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="pensamiento_enriquecido")
             
-            if "?" in enriched and source != "conversation" and self.fm.satiety.can_generate("web_search"):
-                self.fm.maintenance._maybe_search_web_for_thought(enriched)
+            if "?" in enriched_thought and self.fm.satiety.can_generate("web_search"):
+                self._auto_resolve_doubt(enriched_thought)
             
-            return enriched
+            return enriched_thought
         
         return thought_content
     
@@ -388,6 +490,23 @@ Pensamiento:"""
         emocion = self_state.get("estado_actual", {}).get("emocion", "neutral")
         thought_rules = self._get_thought_rules()
 
+        # Rutear el pensamiento interno para decidir qué macro-red activar
+        route = self.fm.interaction._decide_info_needs(active_summary[:300] if active_summary else "prospección interna")
+        network = route.get("needs", "PERSONAL")
+
+        if network == "WORK":
+            # Enfocar en código/documentación indexada
+            replay_context = self._get_replay_context(active_summary, prefer_code=True)
+        elif network == "PERSONAL":
+            # Enfocar en identidad y estado interno
+            replay_context = self._get_personal_context()
+        elif network == "EXTERNAL":
+            # Generar intención para el Scratchpad (no ejecutar ahora)
+            self._add_scratchpad_intention(active_summary)
+            replay_context = "[Intención externa registrada para el próximo ciclo activo]"
+        else:
+            replay_context = ""
+
         memory_anchor = ""
         try:
             if hasattr(self.fm, 'associative_memory'):
@@ -407,7 +526,7 @@ Pensamiento:"""
         personality_desc = persona.get("personality_desc", "")
         backstory = persona.get("backstory", "")
         prompt = f"""--- IDENTITY ---
-Eres el núcleo cognitivo de {persona.get('name', 'Nexus')}.
+Eres el núcleo cognitivo de {persona.get('name', '')}.
 Tu tarea actual es PROSPECCIÓN INTERNA.
 Aquí no hablas con el usuario; proyectas escenarios futuros en silencio.
 --- END IDENTITY ---
@@ -437,20 +556,20 @@ Pensamiento:"""
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("prospeccion")
         thought = self.fm.llm.generate(prompt, temperature=temp, max_tokens=100, purpose="simulacion_fondo")
-        enriched = self._enrich_thought_with_context(thought, "prospection", None)
+        enriched_thought = self._enrich_thought_with_context(thought, "prospection", None)
 
         # Validación post-generación
         try:
             from core.memory.episodic_memory import EpisodicMemory
             episodic = EpisodicMemory()
             resultado = episodic.get_relevant_with_contradiction(
-                enriched, user_id=self.fm.cognitive_loop.user_id, limit=1
+                enriched_thought, user_id=self.fm.cognitive_loop.user_id, limit=1
             )
             veredicto = resultado.get("veredicto", "OK")
             
             if veredicto == "ESCALAR_A_GEMINI":
                 print(f"   [Contradiccion] Alucinacion en prospeccion. Escalando a Gemini...")
-                enriched = self._regenerate_with_gemini(
+                enriched_thought = self._regenerate_with_gemini(
                     prompt_original=prompt,
                     recuerdo_real=resultado.get("recuerdo", ""),
                     active_summary=active_summary,
@@ -463,22 +582,212 @@ Pensamiento:"""
                     enriched_frio, user_id=self.fm.cognitive_loop.user_id, limit=1
                 )
                 if resultado2.get("veredicto") in ("ESCALAR_A_GEMINI", "REGENERAR_LOCAL"):
-                    enriched = self._regenerate_with_gemini(
+                    enriched_thought = self._regenerate_with_gemini(
                         prompt_original=prompt,
                         recuerdo_real=resultado2.get("recuerdo", resultado.get("recuerdo", "")),
                         active_summary=active_summary,
                         tipo_tarea="Prospección futura"
                     )
                 else:
-                    enriched = enriched_frio
+                    enriched_thought = enriched_frio
         except Exception as e:
             print(f"   [!] Error en validacion post-generacion (prospeccion): {e}")
 
         self.fm.stream.add_thought(ThoughtItem(
-            content=f"[Prospección] {enriched}",
+            content=f"[Prospección] {enriched_thought}",
             thought_type="prospection",
             priority=0.45,
             source="internal"
         ))
         self.fm.last_thought_time = datetime.now()
-        self.fm._store_curiosity(f"[Prospección] {enriched}")
+        self.fm._store_curiosity(f"[Prospección] {enriched_thought}")
+
+    def _get_replay_context(self, active_summary: str, prefer_code: bool = False) -> str:
+        """Obtiene contexto para Hippocampal Replay según la red activada."""
+        try:
+            episodic = self.fm.cognitive_loop.episodic_memory
+            if prefer_code:
+                results = episodic.query_procedural(active_summary[:300], n_results=2)
+                if results:
+                    f = results[0]
+                    return f"[CODE - {f.get('file', '')} ({f.get('line_range', '')})]:\n{f.get('code', '')[:500]}"
+            results = episodic.query_semantic(active_summary[:300], n_results=2)
+            if results:
+                return f"[INDEXED]:\n{results[0].get('content', '')[:500]}"
+        except Exception:
+            pass
+        return ""
+
+    def _get_personal_context(self) -> str:
+        """Obtiene contexto personal para reflexión interna."""
+        try:
+            state = self.fm.cognitive_loop.self_memory.load_state()
+            emocion = state.get("estado_actual", {}).get("emocion", "neutral")
+            confianza = state.get("relacion_con_usuario", {}).get("confianza", 0.5)
+            return f"[INTERNAL STATE]: emotion={emocion}, confidence={confianza:.0%}"
+        except Exception:
+            return ""
+
+    def _add_scratchpad_intention(self, active_summary: str):
+        """Registra una intención externa para el próximo ciclo activo (Scratchpad)."""
+        intention = f"[PENDIENTE_EXTERNO]: {active_summary[:200]}"
+        # Guardar en curiosidades como intención (luego se puede mover a un Scratchpad real)
+        self.fm._store_curiosity(intention)
+
+    def _auto_resolve_doubt(self, thought: str):
+        """
+        Filtro Epistémico: evalúa si la duda merece búsqueda web.
+        Si sí, abstrae a queries universales y busca.
+        """
+
+        import re
+
+        # Detectar "Search for:" en el pensamiento
+        search_match = re.search(r'Search for:\s*(.+?)(?:\n|$)', thought, re.IGNORECASE)
+        if search_match:
+            duda = search_match.group(1).strip()
+            print(f"   [AutoResearch] Search for detectado: '{duda}...'")
+        
+        questions = re.findall(r'[^.!?]*\?', thought)
+        if not questions:
+            return
+        
+        duda = questions[0][:200].strip()
+        
+        # Verificar satiety
+        if not self.fm.satiety.can_generate("web_search"):
+            return
+
+        # Filtro de dominio dinámico: ¿es una duda técnica relevante para esta entidad?
+        if hasattr(self.fm, 'domain_filter'):
+            if not self.fm.domain_filter.is_technical(duda):
+                return  # No es una duda del dominio técnico de la entidad
+        
+        # Fase 1: Evaluar relevancia con Filtro Epistémico
+        from core.perception.epistemic_filter import evaluar_y_formular_busqueda
+        active_summary = self.fm.stream.get_all_active_summary()
+        
+        evaluacion = evaluar_y_formular_busqueda(duda, active_summary[:300], self.fm.llm)
+        
+        if not evaluacion or not evaluacion.get("requiere_web"):
+            if evaluacion:
+                print(f"   [AutoResearch] Descartada: {evaluacion.get('razon', '')[:80]}")
+            return
+        
+        # Fase 2: Usar queries universales (abstraídas)
+        queries = evaluacion.get("queries_universales", [duda])
+
+        depth_limit = evaluacion.get("profundidad_requerida", 2)
+        for query in queries[:depth_limit]:
+            try:
+                from ddgs import DDGS
+                results = DDGS().text(query, max_results=2)
+                
+                if results:
+                    snippets = []
+                    for r in results:
+                        body = r.get("body", "")[:300]
+                        if body:
+                            snippets.append(body)
+                    
+                    if snippets:
+                        resolution = (
+                            f"[Auto-research] Duda original: {duda[:100]}\n"
+                            f"Query universal: {query}\n"
+                            f"Razón: {evaluacion.get('razon', '')}\n"
+                            f"Hallazgo: {' | '.join(snippets)}"
+                        )
+
+                        snippets_text = ' | '.join(snippets)
+
+                        # Auto-examen universal: generar síntesis para validar utilidad
+                        if snippets:
+                            snippets_text = ' | '.join(snippets)
+                            
+                            persona = self.fm.cognitive_loop.load_persona()
+                            name = persona.get("name", "La entidad")
+                            role = persona.get("role_type", "conversational")
+                            
+                            # Entregable según rol
+                            role_deliverables = {
+                                "self_engineer": "a clean refactoring proposal or executable code block",
+                                "researcher": "a formal technical hypothesis and its falsification method",
+                                "data_analyst": "a data-driven insight with metrics",
+                                "conversational": "a key takeaway for future interactions",
+                            }
+                            deliverable = role_deliverables.get(role, "a brief synthesis")
+                            
+                            exam_prompt = f"""[EPISTEMIC VALIDATION SYSTEM]
+                        You are evaluating external research quality for integration into permanent semantic memory.
+
+                        [WEB EVIDENCE]:
+                        {snippets_text[:800]}
+
+                        [TASK]:
+                        1. CRITIQUE: Evaluate if sources agree or if there are contradictions, obsolescence, or technical hallucinations in the snippets.
+                        2. COMPATIBILITY: Determine if this knowledge applies to your domain (Role: {role}) and technical environment.
+                        3. INTEGRATION SYNTHESIS: If valid and useful, generate {deliverable}. If irrelevant or contradictory, explicitly state why it must be rejected.
+
+                        Respond in {IDIOMA} with:
+                        - CONFIDENCE ASSESSMENT: [Approved / Rejected + Reason]
+                        - SEMANTIC DISTILLATE: [The clean, real knowledge ready for indexing]"""
+                            
+                            synthesis = self.fm.llm.generate(exam_prompt, temperature=0.3, max_tokens=250, purpose="sintesis_autoexamen")
+                            
+                            if synthesis and len(synthesis) > 30:
+                                # Solo guardar si fue aprobada
+                                if "APPROVED" in synthesis.upper() or "APROBADA" in synthesis.upper():
+                                    resolution += f"\n[Validated]: {synthesis[:400]}"
+                                else:
+                                    print(f"   [AutoResearch] Rechazada por auto-examen: {synthesis[:80]}...")
+                                    return  # No guardar, no inyectar en stream
+
+                        # Guardar en semantic_library
+                        try:
+                            self.fm.cognitive_loop.episodic_memory.store_semantic(
+                                content=resolution,
+                                metadata={
+                                    "source": "self_learning_cycle",
+                                    "type": "auto_research",
+                                    "topic": duda[:100],
+                                    "query": query,
+                                    "importance": 0.6,
+                                }
+                            )
+                            self.fm.satiety.register("web_search")
+                            print(f"   [AutoResearch] Indexado: {query[:60]}...")
+                        except Exception:
+                            pass
+                        
+                        # Incrementar utility_score en working_buffer si existe
+                        try:
+                            episodic = self.fm.cognitive_loop.episodic_memory
+                            existing = episodic.working_buffer.get(
+                                where={"query": query[:100]},
+                                include=["metadatas"]
+                            )
+                            if existing.get("ids") and existing.get("metadatas"):
+                                updated_metas = []
+                                for meta in existing["metadatas"]:
+                                    if meta:
+                                        meta["utility_score"] = min(1.0, meta.get("utility_score", 0.0) + 0.3)
+                                        meta["validated"] = True
+                                    updated_metas.append(meta)
+                                episodic.working_buffer.update(
+                                    ids=existing["ids"],
+                                    metadatas=updated_metas
+                                )
+                                print(f"   [WorkingBuffer] Utility +0.3 para: {query[:60]}...")
+                        except Exception:
+                            pass
+
+                        # Inyectar en stream
+                        from core.flow.flow_stream import ThoughtItem
+                        self.fm.stream.add_thought(ThoughtItem(
+                            content=f"[Aprendizaje] {resolution[:200]}",
+                            thought_type="learning",
+                            priority=0.6,
+                            source="auto_research"
+                        ))
+            except Exception as e:
+                print(f"   [AutoResearch] Error búsqueda: {e}")
