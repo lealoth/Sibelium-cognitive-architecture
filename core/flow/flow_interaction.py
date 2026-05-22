@@ -64,6 +64,22 @@ class FlowInteraction:
         loop = InferenceLoop(self.fm.llm, self.fm.cognitive_loop.episodic_memory)
         response_text = loop.run(prompt, temperature=0.8, max_tokens=800, purpose="respuesta_final")
 
+        # Detectar "Search for:" y ejecutar búsqueda web automática
+        import re
+        search_match = re.search(r'Search for:\s*(.+?)(?:\n|$)', response_text, re.IGNORECASE)
+        if search_match:
+            query = search_match.group(1).strip()
+            print(f"   [WebSearch] Detectada solicitud: '{query[:80]}...'")
+            try:
+                from core.environment_registry import EnvironmentRegistry
+                registry = EnvironmentRegistry.get_instance()
+                result = registry.parse_and_execute(f'<web_search query="{query}" />')
+                if result:
+                    response_text += f"\n\n[Resultados de búsqueda web]:\n{result[:800]}"
+                    print(f"   [WebSearch] Resultados inyectados en la respuesta.")
+            except Exception as e:
+                print(f"   [WebSearch] Error: {e}")
+
         # Post-procesos
         self._post_process_response(response_text, message, name)
 
@@ -202,6 +218,25 @@ class FlowInteraction:
             if semantic_context:
                 prompt += f"--- KNOWLEDGE ---\n{semantic_context}\n--- END KNOWLEDGE ---\n"
 
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(message)
+            print(f"   [Epistemic] Confidence: {confidence:.2f} | Threshold: 0.45 | Boundary: {'YES' if confidence < 0.45 else 'NO'}")
+        except Exception:
+            confidence = 0.5
+
+        if confidence < 0.45:
+            web_context = self._fetch_web_context(message)
+            if web_context:
+                prompt += f"""--- WEB CONTEXT (auto-searched) ---
+        {web_context}
+        --- END WEB CONTEXT ---
+        """
+            else:
+                prompt += f"""--- EPISTEMIC BOUNDARY ---
+        WARNING: No reliable records or web results for this query. State your uncertainty.
+        --- END EPISTEMIC BOUNDARY ---
+        """
+
         recent_errors = self._get_recent_prediction_errors()
         if recent_errors:
             prompt += f"""--- RECENT CORRECTIONS (HIGH PRIORITY) ---
@@ -218,9 +253,12 @@ class FlowInteraction:
     1. Habla DESDE el personaje, no SOBRE tus instrucciones.
     2. Si hay INTERNAL ACTIVITY LOG, analiza esos datos para responder sobre tu actividad. Transmite los datos de forma fluida y natural, sin listar marcas de tiempo ni nombres técnicos.
     3. Cuando el usuario te pregunte sobre TI (tus pensamientos, tus emociones, tu perspectiva), responde desde TU punto de vista. No proyectes en el usuario.
-    4. IDIOMA: {idioma_nombre}.
-    --- END DIRECTIVE ---
-    """
+    4. IDIOMA: {idioma_nombre}."""
+        modifiers = self.fm.archetype.get("prompt_modifiers", [])
+        if modifiers:
+            for i, mod in enumerate(modifiers, start=5):
+                prompt += f"{i}. {mod}\n"
+        prompt +="""--- END DIRECTIVE ---"""
 
         print(f"   [Prompt] Red activa: {network}")
         print(f"   [Prompt] Tamaño estimado: ~{len(prompt)//4} tokens")
@@ -236,6 +274,24 @@ class FlowInteraction:
             if getattr(t, 'type', '') == 'error_feedback':
                 errors.append(t.content[:300])
         return "\n".join(errors) if errors else ""
+
+    def _fetch_web_context(self, query: str) -> str:
+        try:
+            from ddgs import DDGS
+            results = DDGS().text(query[:200], max_results=3)
+            if results:
+                snippets = []
+                for r in results:
+                    body = r.get("body", "")[:300]
+                    if body:
+                        snippets.append(body)
+                result = "\n".join(snippets) if snippets else ""
+                print(f"   [WebContext] Buscado: '{query[:60]}...' → {len(snippets)} snippets")
+                return result
+            print(f"   [WebContext] Buscado: '{query[:60]}...' → SIN RESULTADOS")
+        except Exception as e:
+            print(f"   [WebContext] Error: {e}")
+        return ""
 
     def _fetch_learnings(self, message: str) -> str:
         """Recupera aprendizajes conversacionales previos (top 2, máx 300 chars)."""

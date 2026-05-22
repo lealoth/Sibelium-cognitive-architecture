@@ -1,0 +1,13 @@
+{
+  "name": "Web Search",
+  "version": "1.0.0",
+  "description": "Enables entities to search the web reactively and proactively. Integrates with EnvironmentRegistry for tool calling during inference and background auto-research.",
+  "author": "Sibelium",
+  "dependencies": [],
+  "permissions": ["web_access"],
+  "config": {
+    "max_searches_per_hour": 20,
+    "auto_research_enabled": true,
+    "reactive_search_enabled": true
+  }
+}

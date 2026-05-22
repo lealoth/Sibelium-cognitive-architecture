@@ -15,7 +15,7 @@ class FlowThoughts:
         "deep_reflection": 450,
         "curiosity": 240,
         "simulation": 1200,
-        "prospection": 600,  # Nueva: prospección cada 10 min
+        "prospection": 600,  
         "web_search": 750,
         "proactive_check": 120,
     }
@@ -92,11 +92,23 @@ Pensamiento:"""
         else:
             replay_context = self._get_personal_context()
         
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
+
+        # Frontera Epistémica: detectar vacíos de conocimiento
+        if replay_context and confidence < 0.45:
+            web_context = self._fetch_web_for_thought(active_summary[:200])
+            if web_context:
+                replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
+
         prompt = f"""--- HIPPOCAMPAL REPLAY ({network}) ---
     [ACTIVE THOUGHTS]: {active_summary}
     {thought_rules}
     {replay_context if replay_context else '[No context available]'}
-
     This is offline mental rehearsal in {network} mode.
     Generate a speculative reflection appropriate to this mode.
     Respond in 1 sentence in {IDIOMA}."""
@@ -108,6 +120,10 @@ Pensamiento:"""
         
         self.fm.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="curiosity", priority=0.5, source="internal"))
         self.fm.last_thought_time = datetime.now() 
+
+        # Detectar duda epistémica y auto-responder con búsqueda web
+        if "?" in enriched_thought and self.fm.satiety.can_generate("web_search"):
+            self._auto_resolve_doubt(enriched_thought)
 
     
     def _generate_simulation(self):
@@ -134,8 +150,20 @@ Pensamiento:"""
         else:
             replay_context = ""
 
+        try:
+            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(
+                active_summary[:300] if active_summary else replay_context[:300]
+            )
+        except Exception:
+            confidence = 0.5
+
+        # Frontera Epistémica: detectar vacíos de conocimiento
+        if replay_context and confidence < 0.45:
+            web_context = self._fetch_web_for_thought(active_summary[:200])
+            if web_context:
+                replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
+
         # Query dinámico basado en el contexto activo
-        replay_context = ""
         try:
             episodic = self.fm.cognitive_loop.episodic_memory
             results = episodic.query_procedural(active_summary[:300], n_results=3)
@@ -152,31 +180,41 @@ Pensamiento:"""
         except Exception:
             pass
         
+        modes = self.fm.archetype.get("simulation_modes", {})
+        modes_text = "\n".join([f"- {k}: {v}" for k, v in modes.items()])
+
         prompt = f"""--- HIPPOCAMPAL REPLAY: MENTAL REHEARSAL ---
-    [ACTIVE THOUGHTS]: {active_summary}
-    [EMOTIONAL STATE]: {emocion}
-    {thought_rules}
-    {replay_context if replay_context else '[No indexed content available for rehearsal]'}
+        [ACTIVE THOUGHTS]: {active_summary}
+        [EMOTIONAL STATE]: {emocion}
+        {thought_rules}
+        {replay_context if replay_context else '[No indexed content available for rehearsal]'}
+        This is offline mental rehearsal. Choose ONE approach (2-3 sentences):
+        {modes_text}
 
-    This is offline mental rehearsal. Based on the indexed content and your active thoughts,
-    simulate a scenario: what would happen if this were under stress, or what improvement
-    could be made? Choose ONE approach (2-3 sentences):
-    - PREDICTIVE: What would break first under heavy load?
-    - EXPLORATORY: What pattern or structure could improve this?
-    - OPTIMIZATION: What would you refactor to reduce complexity?
-
-    Respond in {IDIOMA}. Be specific."""
+        Respond in {IDIOMA}. Be specific."""
         
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("simulacion")
         thought = self.fm.llm.generate(prompt, temperature=temp, max_tokens=120, purpose="simulacion_fondo")
-        enriched = self._enrich_thought_with_context(thought, "simulation", None)
+        enriched_thought = self._enrich_thought_with_context(thought, "simulation", None)
         
         
-        self.fm.stream.add_thought(ThoughtItem(content=enriched, thought_type="simulation", priority=0.5, source="internal"))
+        self.fm.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="simulation", priority=0.5, source="internal"))
         self.fm.last_thought_time = datetime.now()
-        self.fm._store_curiosity(enriched)
+        self.fm._store_curiosity(enriched_thought)
     
+    def _fetch_web_for_thought(self, query: str) -> str:
+        """Busca en web para pensamientos de fondo."""
+        try:
+            from ddgs import DDGS
+            results = DDGS().text(query[:200], max_results=2)
+            if results:
+                snippets = [r.get("body", "")[:300] for r in results if r.get("body")]
+                return "\n".join(snippets) if snippets else ""
+        except Exception:
+            pass
+        return ""
+
     def _regenerate_with_gemini(self, prompt_original: str, recuerdo_real: str, active_summary: str, tipo_tarea: str) -> str:
         """
         Regenera una simulación desde cero usando Gemini 2.0 Flash con ancla factual.
@@ -325,12 +363,12 @@ Genera un pensamiento enriquecido (1-2 frases). Responde solo en {IDIOMA}.
 
 Pensamiento:"""
             
-            enriched = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="pensamiento_enriquecido")
+            enriched_thought = self.fm.llm.generate(prompt, temperature=0.7, max_tokens=150, purpose="pensamiento_enriquecido")
             
-            if "?" in enriched and source != "conversation" and self.fm.satiety.can_generate("web_search"):
-                self.fm.maintenance._maybe_search_web_for_thought(enriched)
+            if "?" in enriched_thought and self.fm.satiety.can_generate("web_search"):
+                self._auto_resolve_doubt(enriched_thought)
             
-            return enriched
+            return enriched_thought
         
         return thought_content
     
@@ -421,20 +459,20 @@ Pensamiento:"""
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("prospeccion")
         thought = self.fm.llm.generate(prompt, temperature=temp, max_tokens=100, purpose="simulacion_fondo")
-        enriched = self._enrich_thought_with_context(thought, "prospection", None)
+        enriched_thought = self._enrich_thought_with_context(thought, "prospection", None)
 
         # Validación post-generación
         try:
             from core.memory.episodic_memory import EpisodicMemory
             episodic = EpisodicMemory()
             resultado = episodic.get_relevant_with_contradiction(
-                enriched, user_id=self.fm.cognitive_loop.user_id, limit=1
+                enriched_thought, user_id=self.fm.cognitive_loop.user_id, limit=1
             )
             veredicto = resultado.get("veredicto", "OK")
             
             if veredicto == "ESCALAR_A_GEMINI":
                 print(f"   [Contradiccion] Alucinacion en prospeccion. Escalando a Gemini...")
-                enriched = self._regenerate_with_gemini(
+                enriched_thought = self._regenerate_with_gemini(
                     prompt_original=prompt,
                     recuerdo_real=resultado.get("recuerdo", ""),
                     active_summary=active_summary,
@@ -447,25 +485,25 @@ Pensamiento:"""
                     enriched_frio, user_id=self.fm.cognitive_loop.user_id, limit=1
                 )
                 if resultado2.get("veredicto") in ("ESCALAR_A_GEMINI", "REGENERAR_LOCAL"):
-                    enriched = self._regenerate_with_gemini(
+                    enriched_thought = self._regenerate_with_gemini(
                         prompt_original=prompt,
                         recuerdo_real=resultado2.get("recuerdo", resultado.get("recuerdo", "")),
                         active_summary=active_summary,
                         tipo_tarea="Prospección futura"
                     )
                 else:
-                    enriched = enriched_frio
+                    enriched_thought = enriched_frio
         except Exception as e:
             print(f"   [!] Error en validacion post-generacion (prospeccion): {e}")
 
         self.fm.stream.add_thought(ThoughtItem(
-            content=f"[Prospección] {enriched}",
+            content=f"[Prospección] {enriched_thought}",
             thought_type="prospection",
             priority=0.45,
             source="internal"
         ))
         self.fm.last_thought_time = datetime.now()
-        self.fm._store_curiosity(f"[Prospección] {enriched}")
+        self.fm._store_curiosity(f"[Prospección] {enriched_thought}")
 
     def _get_replay_context(self, active_summary: str, prefer_code: bool = False) -> str:
         """Obtiene contexto para Hippocampal Replay según la red activada."""
@@ -498,3 +536,161 @@ Pensamiento:"""
         intention = f"[PENDIENTE_EXTERNO]: {active_summary[:200]}"
         # Guardar en curiosidades como intención (luego se puede mover a un Scratchpad real)
         self.fm._store_curiosity(intention)
+
+    def _auto_resolve_doubt(self, thought: str):
+        """
+        Filtro Epistémico: evalúa si la duda merece búsqueda web.
+        Si sí, abstrae a queries universales y busca.
+        """
+
+        import re
+
+        # Detectar "Search for:" en el pensamiento
+        search_match = re.search(r'Search for:\s*(.+?)(?:\n|$)', thought, re.IGNORECASE)
+        if search_match:
+            duda = search_match.group(1).strip()
+            print(f"   [AutoResearch] Search for detectado: '{duda}...'")
+        
+        questions = re.findall(r'[^.!?]*\?', thought)
+        if not questions:
+            return
+        
+        duda = questions[0][:200].strip()
+        
+        # Verificar satiety
+        if not self.fm.satiety.can_generate("web_search"):
+            return
+
+        # Filtro de dominio dinámico: ¿es una duda técnica relevante para esta entidad?
+        if hasattr(self.fm, 'domain_filter'):
+            if not self.fm.domain_filter.is_technical(duda):
+                return  # No es una duda del dominio técnico de la entidad
+        
+        # Fase 1: Evaluar relevancia con Filtro Epistémico
+        from core.perception.epistemic_filter import evaluar_y_formular_busqueda
+        active_summary = self.fm.stream.get_all_active_summary()
+        
+        evaluacion = evaluar_y_formular_busqueda(duda, active_summary[:300], self.fm.llm)
+        
+        if not evaluacion or not evaluacion.get("requiere_web"):
+            if evaluacion:
+                print(f"   [AutoResearch] Descartada: {evaluacion.get('razon', '')[:80]}")
+            return
+        
+        # Fase 2: Usar queries universales (abstraídas)
+        queries = evaluacion.get("queries_universales", [duda])
+
+        depth_limit = evaluacion.get("profundidad_requerida", 2)
+        for query in queries[:depth_limit]:
+            try:
+                from ddgs import DDGS
+                results = DDGS().text(query, max_results=2)
+                
+                if results:
+                    snippets = []
+                    for r in results:
+                        body = r.get("body", "")[:300]
+                        if body:
+                            snippets.append(body)
+                    
+                    if snippets:
+                        resolution = (
+                            f"[Auto-research] Duda original: {duda[:100]}\n"
+                            f"Query universal: {query}\n"
+                            f"Razón: {evaluacion.get('razon', '')}\n"
+                            f"Hallazgo: {' | '.join(snippets)}"
+                        )
+
+                        snippets_text = ' | '.join(snippets)
+
+                        # Auto-examen universal: generar síntesis para validar utilidad
+                        if snippets:
+                            snippets_text = ' | '.join(snippets)
+                            
+                            persona = self.fm.cognitive_loop.load_persona()
+                            name = persona.get("name", "La entidad")
+                            role = persona.get("role_type", "conversational")
+                            
+                            # Entregable según rol
+                            role_deliverables = {
+                                "self_engineer": "a clean refactoring proposal or executable code block",
+                                "researcher": "a formal technical hypothesis and its falsification method",
+                                "data_analyst": "a data-driven insight with metrics",
+                                "conversational": "a key takeaway for future interactions",
+                            }
+                            deliverable = role_deliverables.get(role, "a brief synthesis")
+                            
+                            exam_prompt = f"""[EPISTEMIC VALIDATION SYSTEM]
+                        You are evaluating external research quality for integration into permanent semantic memory.
+
+                        [WEB EVIDENCE]:
+                        {snippets_text[:800]}
+
+                        [TASK]:
+                        1. CRITIQUE: Evaluate if sources agree or if there are contradictions, obsolescence, or technical hallucinations in the snippets.
+                        2. COMPATIBILITY: Determine if this knowledge applies to your domain (Role: {role}) and technical environment.
+                        3. INTEGRATION SYNTHESIS: If valid and useful, generate {deliverable}. If irrelevant or contradictory, explicitly state why it must be rejected.
+
+                        Respond in {IDIOMA} with:
+                        - CONFIDENCE ASSESSMENT: [Approved / Rejected + Reason]
+                        - SEMANTIC DISTILLATE: [The clean, real knowledge ready for indexing]"""
+                            
+                            synthesis = self.fm.llm.generate(exam_prompt, temperature=0.3, max_tokens=250, purpose="sintesis_autoexamen")
+                            
+                            if synthesis and len(synthesis) > 30:
+                                # Solo guardar si fue aprobada
+                                if "APPROVED" in synthesis.upper() or "APROBADA" in synthesis.upper():
+                                    resolution += f"\n[Validated]: {synthesis[:400]}"
+                                else:
+                                    print(f"   [AutoResearch] Rechazada por auto-examen: {synthesis[:80]}...")
+                                    return  # No guardar, no inyectar en stream
+
+                        # Guardar en semantic_library
+                        try:
+                            self.fm.cognitive_loop.episodic_memory.store_semantic(
+                                content=resolution,
+                                metadata={
+                                    "source": "self_learning_cycle",
+                                    "type": "auto_research",
+                                    "topic": duda[:100],
+                                    "query": query,
+                                    "importance": 0.6,
+                                }
+                            )
+                            self.fm.satiety.register("web_search")
+                            print(f"   [AutoResearch] Indexado: {query[:60]}...")
+                        except Exception:
+                            pass
+                        
+                        # Incrementar utility_score en working_buffer si existe
+                        try:
+                            episodic = self.fm.cognitive_loop.episodic_memory
+                            existing = episodic.working_buffer.get(
+                                where={"query": query[:100]},
+                                include=["metadatas"]
+                            )
+                            if existing.get("ids") and existing.get("metadatas"):
+                                updated_metas = []
+                                for meta in existing["metadatas"]:
+                                    if meta:
+                                        meta["utility_score"] = min(1.0, meta.get("utility_score", 0.0) + 0.3)
+                                        meta["validated"] = True
+                                    updated_metas.append(meta)
+                                episodic.working_buffer.update(
+                                    ids=existing["ids"],
+                                    metadatas=updated_metas
+                                )
+                                print(f"   [WorkingBuffer] Utility +0.3 para: {query[:60]}...")
+                        except Exception:
+                            pass
+
+                        # Inyectar en stream
+                        from core.flow.flow_stream import ThoughtItem
+                        self.fm.stream.add_thought(ThoughtItem(
+                            content=f"[Aprendizaje] {resolution[:200]}",
+                            thought_type="learning",
+                            priority=0.6,
+                            source="auto_research"
+                        ))
+            except Exception as e:
+                print(f"   [AutoResearch] Error búsqueda: {e}")

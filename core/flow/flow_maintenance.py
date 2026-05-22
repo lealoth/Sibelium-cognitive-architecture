@@ -117,7 +117,7 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
         base_arr = np.array(base_personality)
         base_norm = base_arr / max(np.linalg.norm(base_arr), 1e-8)
         distance = 1.0 - float(np.dot(response_norm, base_norm))
-
+        print(f"   [Inmune] Dist: {distance:.2f}, Umbral: {threshold:.2f}, State: {state}, Role: {persona.get('role_type', '?')}")
         if distance > threshold:
             print(f"   [Inmune] ⚠️ Deriva detectada (dist: {distance:.2f}, umbral: {threshold:.2f}). Restaurando...")
             self._inject_immune_response(distance)
@@ -191,8 +191,13 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
         # Fase geométrica: agrupar fragmentos indexados por densidad vectorial
         clustered_knowledge = self._cluster_indexed_knowledge()
         
+        sleep_focus = self.fm.archetype.get("sleep_focus", "General cognitive consolidation.")
+        domain_keywords = ", ".join(self.fm.domain_filter.get_keywords()[:15]) if hasattr(self.fm, 'domain_filter') else ""
+
         prompt = f"""--- NREM CONSOLIDATION ---
-    [ACTIVE THOUGHTS]: {active_summary}
+        [ACTIVE THOUGHTS]: {active_summary}
+        [COGNITIVE FOCUS]: {sleep_focus}
+        [DOMAIN KEYWORDS]: {domain_keywords}
     [RECENT REFLECTIONS]: {', '.join([c.get('thought', '')[:80] for c in recent[-5:]]) if recent else 'None'}
     [CLUSTERED KNOWLEDGE (grouped by semantic density)]:
     {clustered_knowledge[:1500] if clustered_knowledge else 'No clusters formed'}
@@ -274,8 +279,13 @@ Responde SOLO con la emoción deseada o 'MANTENER'.
         except Exception:
             pass
 
-        prompt = f"""--- REM SPECULATIVE SIMULATION ---
-    [ACTIVE THOUGHTS]: {active_summary}
+        sleep_focus = self.fm.archetype.get("sleep_focus", "General cognitive consolidation.")
+        domain_keywords = ", ".join(self.fm.domain_filter.get_keywords()[:15]) if hasattr(self.fm, 'domain_filter') else ""
+
+        prompt = f"""--- NREM CONSOLIDATION ---
+        [ACTIVE THOUGHTS]: {active_summary}
+        [COGNITIVE FOCUS]: {sleep_focus}
+        [DOMAIN KEYWORDS]: {domain_keywords}
     [CODE TO ANALYZE]: {indexed_file[:1000] if indexed_file else 'No indexed code available'}
 
     Generate a speculative analysis. Imagine a user might ask about a bug or optimization in this code.
@@ -587,50 +597,6 @@ Nuevo tema:"""
             return " | ".join([r["body"] for r in results]) if results else ""
         except Exception:
             return ""
-    
-    def _maybe_search_web(self):
-        if (datetime.now() - self.fm.web_search_reset).total_seconds() > 3600:
-            self.fm.web_search_count = 0
-            self.fm.web_search_reset = datetime.now()
-        if self.fm.web_search_count >= 3:
-            return False
-        
-        curiosities = self.fm._load_curiosities()
-        if not curiosities:
-            return False
-        
-        recent = curiosities[-5:]  # ← Primero definir
-        
-        # Luego limpiar
-        recent_cleaned = [self._clean_thought_for_search(c.get("thought", "")) for c in recent]
-        recent_cleaned = [c for c in recent_cleaned if len(c) > 10]
-        prompt = f"""<system_identity>
-Eres el evaluador de necesidades de búsqueda.
-</system_identity>
-
-<recent_thoughts>
-{chr(10).join([f'- {c.get("thought", "")}' for c in recent])}
-</recent_thoughts>
-
-<search_directive>
-¿Alguno de estos pensamientos genera una duda que requiera buscar en internet?
-Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
-</search_directive>"""
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="decidir_busqueda").strip()
-        decision = re.sub(r'<[^>]+>', '', decision)
-        decision = decision.strip()
-        if decision.upper().startswith("NO") or len(decision) < 3 or len(decision) > 100:
-            return False
-        decision = decision.split('\n')[0].strip()
-        results = self._search_web(decision)
-        if results:
-            self.fm.web_search_count += 1
-            self.fm.stream.add_thought(ThoughtItem(content=f"Busqué '{decision}' en internet y aprendí algo nuevo.", thought_type="web_search", priority=0.5, source="web"))
-            self.fm._store_curiosity(f"[Busqueda: {decision}] {results}")
-            self.fm.last_thought_time = datetime.now()
-            print(f"   [Web] ¡Busqueda realizada! {decision}")
-            return True
-        return False
 
     def _clean_thought_for_search(self, thought: str) -> str:
         """Elimina etiquetas XML y contenido del sistema de los pensamientos."""
@@ -645,39 +611,6 @@ Responde EXACTAMENTE "NO" o escribe una consulta de máximo 8 palabras.
         thought = re.sub(r'---\s*\w+\s*---', '', thought)
         thought = re.sub(r'\[SISTEMA\].*', '', thought)
         return thought.strip()
-
-    def _maybe_search_web_for_thought(self, thought: str):
-        # Limpiar etiquetas XML y contenido del sistema
-        thought = re.sub(r'<[^>]+>', '', thought).strip()
-        thought = re.sub(r'\[SISTEMA\].*', '', thought)
-        if len(thought.strip()) < 10:
-            return
-        if self.fm.web_search_count >= 3:
-            return
-        prompt = f"""<system_identity>
-Eres el evaluador de necesidades de búsqueda
-</system_identity>
-
-<thought>
-Un pensamiento generó esta duda: "{thought}"
-</thought>
-
-<search_directive>
-Extrae una consulta de búsqueda de máximo 8 palabras. Si no es necesario, responde NO.
-</search_directive>"""
-        decision = self.fm.llm.generate(prompt, temperature=0.4, max_tokens=15, purpose="busqueda_desde_pensamiento").strip()
-        decision = re.sub(r'<[^>]+>', '', decision)
-        decision = decision.strip()
-
-        if decision.upper().startswith("NO") or len(decision) < 3:
-            return
-        results = self._search_web(decision)
-        if results:
-            self.fm.web_search_count += 1
-            self.fm.stream.add_thought(ThoughtItem(content=f"Busqué '{decision}' y aprendí: {results}", thought_type="web_search", priority=0.5, source="web"))
-            self.fm._store_curiosity(f"[Busqueda desde pensamiento: {decision}] {results}")
-            self.fm.last_thought_time = datetime.now()
-            print(f"   [Web] Búsqueda desde pensamiento: {decision}")
     
     # ============================================
     # PREDICCIÓN
@@ -770,47 +703,6 @@ Mensaje:"""
             print(f"   [Proactivo] Mensaje generado: {message[:80]}...")
         except Exception as e:
             print(f"   [!] Error en mensaje proactivo: {e}")
-
-    def _run_immune_check(self):
-        """Sistema Inmune Lógico: detecta deriva de personalidad cada 5 minutos."""
-        now = datetime.now()
-        if not hasattr(self.fm, '_last_immune_check'):
-            self.fm._last_immune_check = None
-        if self.fm._last_immune_check and (now - self.fm._last_immune_check).total_seconds() < 300:
-            return
-        self.fm._last_immune_check = now
-
-        # Obtener últimas respuestas del historial
-        recent_responses = [
-            entry.get("text", "") for entry in self.fm.cognitive_loop.last_history[-5:]
-            if entry.get("role") == "assistant"
-        ]
-        if len(recent_responses) < 2:
-            return
-
-        # Vector de personalidad base (desde persona.json)
-        base_personality = self._get_personality_vector()
-        if base_personality is None:
-            return
-
-        # Vector de respuestas recientes
-        import numpy as np
-        response_text = " ".join(recent_responses)[:500]
-        response_emb = self.fm.stream._get_embedding(response_text)
-        if response_emb is None:
-            return
-
-        # Calcular distancia coseno entre personalidad base y respuestas recientes
-        response_arr = np.array(response_emb)
-        response_norm = response_arr / max(np.linalg.norm(response_arr), 1e-8)
-        base_arr = np.array(base_personality)
-        base_norm = base_arr / max(np.linalg.norm(base_arr), 1e-8)
-        distance = 1.0 - float(np.dot(response_norm, base_norm))
-
-        # Si la distancia es > 0.5, hay deriva de personalidad
-        if distance > 0.5:
-            print(f"   [Inmune] ⚠️ Deriva de personalidad detectada (distancia: {distance:.2f}). Restaurando...")
-            self._inject_immune_response(distance)
 
     def _get_personality_vector(self) -> list:
         """Obtiene el vector de personalidad base desde persona.json."""

@@ -28,8 +28,6 @@ class CognitiveLoop:
         self.interaction_count_path = self.user_dir / "interaction_count.json"
         self.conversation_summary = ""
 
-        self.short_term_history = []
-
         # Memorias (UserMemory recibe user_id)
         self.episodic_memory = EpisodicMemory()
         self.user_memory = UserMemory(user_id=user_id)
@@ -47,6 +45,16 @@ class CognitiveLoop:
         self.flow_manager = FlowManager(self)
         if start_flow:
             self.flow_manager.start()
+
+        # Cargar short_term_history desde history.json
+        self.short_term_history = []
+        if self.last_history:
+            # Tomar los últimos 8 mensajes (4 intercambios)
+            for entry in self.last_history[-8:]:
+                self.short_term_history.append({
+                    "role": entry.get("role", "user"),
+                    "text": entry.get("text", "")[:200]
+                })
 
     # ============================================
     # PERSISTENCIA
@@ -566,24 +574,46 @@ Sé específico y personal. No repitas frases anteriores.
             pass
 
     def evaluate_conversational_outcome(self, user_message: str, assistant_response: str) -> dict:
-        """Analizador de Recompensa Conversacional."""
-        from core.perception.user_analysis import analyze_user_message
-        analysis = analyze_user_message(user_message)
-        emotion = analysis.get("emotion", "neutral")
-        user_lower = user_message.lower()
-        
-        positive = sum(1 for ind in ["gracias", "exacto", "buen análisis", "correcto", "eso es", "me gusta", "interesante", "tienes razón"] if ind in user_lower)
-        negative = sum(1 for ind in ["no me entiendes", "mal", "equivocado", "no es eso", "no tiene sentido", "alucinación", "inventas"] if ind in user_lower)
-        is_correction = any(ind in user_lower for ind in ["no es", "corrige", "en realidad", "quiero decir"])
-        
-        if is_correction:
-            return {"outcome": "prediction_error", "feedback": "El usuario corrigió. Ajustar modelo mental.", "importance": 0.7}
-        elif positive > negative:
-            return {"outcome": "success", "feedback": f"Respuesta bien recibida. Emoción: {emotion}.", "importance": 0.6}
-        elif negative > positive:
-            return {"outcome": "prediction_error", "feedback": "El usuario rechazó la respuesta. Reevaluar enfoque.", "importance": 0.7}
-        else:
-            return {"outcome": "implicit_success", "feedback": "Continuidad sin corrección.", "importance": 0.4}
+        """Analizador de Recompensa Conversacional basado en embeddings."""
+        try:
+            msg_emb = self.flow_manager.stream._get_embedding(user_message)
+            if msg_emb is None:
+                return {"outcome": "implicit_success", "feedback": "Sin señal.", "importance": 0.4}
+            
+            import numpy as np
+            msg_arr = np.array(msg_emb)
+            msg_norm = msg_arr / max(np.linalg.norm(msg_arr), 1e-8)
+            
+            # Vectores de sentimiento (multilingües)
+            positive_anchor = self.flow_manager.stream._get_embedding(
+                "excelente buen trabajo correcto gracias funciona perfecto bien hecho exactly great thanks perfect"
+            )
+            negative_anchor = self.flow_manager.stream._get_embedding(
+                "mal error no funciona equivocado incorrecto no sirve pésimo wrong bad incorrect"
+            )
+            
+            if positive_anchor and negative_anchor:
+                pos_arr = np.array(positive_anchor)
+                neg_arr = np.array(negative_anchor)
+                pos_norm = pos_arr / max(np.linalg.norm(pos_arr), 1e-8)
+                neg_norm = neg_arr / max(np.linalg.norm(neg_arr), 1e-8)
+                
+                sim_positive = float(np.dot(msg_norm, pos_norm))
+                sim_negative = float(np.dot(msg_norm, neg_norm))
+                
+                if sim_negative > sim_positive and sim_negative > 0.5:
+                    return {"outcome": "prediction_error", "feedback": "El usuario rechazó la respuesta.", "importance": 0.7}
+                elif sim_positive > sim_negative and sim_positive > 0.5:
+                    return {"outcome": "success", "feedback": "Respuesta bien recibida.", "importance": 0.6}
+            
+            # Si no hay señal clara
+            is_correction = any(ind in user_message.lower() for ind in ["no es", "corrige", "en realidad"])
+            if is_correction:
+                return {"outcome": "prediction_error", "feedback": "Corrección detectada.", "importance": 0.7}
+            
+            return {"outcome": "implicit_success", "feedback": "Continuidad sin señal clara.", "importance": 0.4}
+        except Exception:
+            return {"outcome": "implicit_success", "feedback": "Error en evaluación.", "importance": 0.4}
 
     def consolidate_conversational_learning(self, user_message: str, assistant_response: str, outcome: dict):
         """Consolida aprendizaje conversacional. Solo éxitos van a ChromaDB."""

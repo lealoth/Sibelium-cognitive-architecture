@@ -45,7 +45,13 @@ class FlowManager:
         from core.flow.salience_network import SalienceNetwork
         from core.flow.trn_gate import TRNGate
         from core.perception.deep_reader import DeepReader
+        from core.perception.domain_filter import DomainFilter
+        from core.cognitive_registry import get_archetype
 
+        persona = self.cognitive_loop.load_persona()
+        self.archetype = get_archetype(persona)
+        persona = self.cognitive_loop.load_persona()
+        self.domain_filter = DomainFilter(persona, llm=self.llm)
         self.deep_reader = DeepReader(llm=self.llm)
 
         self.trn_gate = TRNGate()
@@ -76,6 +82,7 @@ class FlowManager:
         self.interaction = FlowInteraction(self)
         self.maintenance = FlowMaintenance(self)
         
+        self._last_immune_check = None
         self.running = False
         self.thread = None
         self.last_thought_time: Optional[datetime] = None
@@ -408,8 +415,6 @@ Responde en una frase corta en {IDIOMA}.
                         self.thoughts._generate_curiosity()
                     elif process_name == "simulation":
                         self.thoughts._generate_simulation()
-                    elif process_name == "web_search":
-                        self.maintenance._maybe_search_web()
                     elif process_name == "proactive_check":
                         self.maintenance._check_proactive()
                     elif process_name == "prospection":
@@ -453,6 +458,13 @@ Responde en una frase corta en {IDIOMA}.
         if self._last_distillation is None or (now - self._last_distillation).total_seconds() >= 7200:
             self._last_distillation = now
             self.cognitive_loop._distill_to_semantic()
+
+        if not hasattr(self, '_last_buffer_validation'):
+            self._last_buffer_validation = None
+        now = datetime.now()
+        if self._last_buffer_validation is None or (now - self._last_buffer_validation).total_seconds() >= 7200:
+            self._last_buffer_validation = now
+            self.cognitive_loop.episodic_memory.validate_and_promote()
             
     # ============================================
     # INTERACCIÓN CON EL USUARIO

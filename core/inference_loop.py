@@ -24,6 +24,7 @@ class InferenceLoop:
         self.registry.register("query_semantic", self._handle_query_semantic)
         self.registry.register("query_procedural", self._handle_query_procedural)
         self.registry.register("query_episodic", self._handle_query_episodic)
+        self.registry.register("web_search", self._handle_web_search)
 
     def run(self, prompt: str, temperature: float = 0.7, max_tokens: int = 800, purpose: str = "respuesta_final") -> str:
         """
@@ -36,7 +37,16 @@ class InferenceLoop:
         for step in range(self.max_steps):
             # Paso de terminación forzada en el último intento
             if step == self.max_steps - 1:
-                context += "\n[SISTEMA: Último paso de pensamiento disponible. Consolida tus observaciones y genera la respuesta final ahora.]\n"
+                termination_msg = getattr(self, 'termination_message', None)
+                if termination_msg is None:
+                    from config import IDIOMA
+                    if IDIOMA == "ES":
+                        termination_msg = "[SISTEMA: Último paso de pensamiento disponible. Consolida tus observaciones y genera la respuesta final ahora.]"
+                    else:
+                        termination_msg = "[SYSTEM: Last thinking step available. Consolidate your observations and generate the final response now.]"
+                    self.termination_message = termination_msg
+
+                context += f"\n{termination_msg}\n"
             
             output = self.llm.generate(
                 context, temperature=temperature, max_tokens=max_tokens, purpose=purpose
@@ -127,3 +137,23 @@ class InferenceLoop:
         if signatures:
             return "Available signatures:\n" + "\n".join(signatures)
         return ""
+
+    def _handle_web_search(self, params: dict) -> Optional[str]:
+        """Búsqueda web como herramienta nativa del EnvironmentRegistry."""
+        query = params.get("query", "")
+        if not query:
+            return None
+        
+        try:
+            from ddgs import DDGS
+            results = DDGS().text(query, max_results=3)
+            if results:
+                snippets = []
+                for r in results:
+                    title = r.get("title", "")[:100]
+                    body = r.get("body", "")[:300]
+                    snippets.append(f"- {title}\n  {body}")
+                return "\n".join(snippets)
+        except Exception as e:
+            print(f"   [WebSearch] Error: {e}")
+        return None

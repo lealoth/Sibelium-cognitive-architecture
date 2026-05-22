@@ -27,6 +27,8 @@ class EpisodicMemory:
         
         self._narrative_direction: Optional[np.ndarray] = None
 
+        self.working_buffer = self.client.get_or_create_collection(name="working_buffer")
+
     # ============================================
     # CRUD - MEMORIA EPISÓDICA
     # ============================================
@@ -347,13 +349,12 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
             return query
 
     def _get_embedding(self, text: str) -> Optional[list]:
+        """Usa el mismo modelo multilingüe que el Temporal Focus."""
         try:
-            from chromadb.utils import embedding_functions
-            ef = embedding_functions.DefaultEmbeddingFunction()
+            ef = _get_embedding_function()
             return ef([text])[0]
         except Exception:
             return None
-
     # ============================================
     # MEMORIA SEMÁNTICA (Papers, teoría)
     # ============================================
@@ -494,6 +495,135 @@ Paso 2: Responde estrictamente en la última línea con: CONTRADICCION o OK.
             else:
                 clean[key] = str(value)
         return clean
+
+    def _sanitize_meta(self, meta: dict) -> dict:
+        clean = {}
+        for key, value in meta.items():
+            if value is None:
+                clean[key] = ""
+            elif isinstance(value, (str, int, float, bool)):
+                clean[key] = value
+            else:
+                clean[key] = str(value)
+        return clean
+
+    def store_external_knowledge(self, snippets: list, query: str, llm=None) -> str:
+        """
+        Almacena conocimiento externo en working_buffer con validación endógena.
+        
+        Filtro 1: Triangulación de fuentes (¿coinciden entre sí?)
+        Filtro 2: Contraste con entorno local (¿es compatible con Sibelium?)
+        
+        Returns: síntesis validada o string vacío si no pasa filtros.
+        """
+        if not snippets:
+            return ""
+        
+        # Filtro 1: Triangulación - comparar snippets entre sí
+        if len(snippets) >= 2:
+            # Buscar términos coincidentes entre fuentes
+            common_terms = set()
+            words1 = set(snippets[0].lower().split())
+            for s in snippets[1:]:
+                words2 = set(s.lower().split())
+                common = words1 & words2
+                if len(common) < 5:  # Menos de 5 palabras en común = fuentes contradictorias
+                    return ""  # Descartar por incoherencia
+        
+        # Guardar en working_buffer (no en semantic_library aún)
+        content = f"[External] Query: {query}\nSources: {len(snippets)}\n" + " | ".join(snippets[:3])
+        doc_id = str(uuid.uuid4())
+        
+        self.working_buffer.add(
+            documents=[content[:1000]],
+            metadatas=[{
+                "source": "web_search",
+                "type": "pending_validation",
+                "query": query[:100],
+                "utility_score": 0.0,
+                "validated": False,
+                "timestamp": datetime.now().isoformat(),
+                "importance": 0.3,  # Baja importancia hasta validar
+            }],
+            ids=[doc_id],
+        )
+        
+        return content
+
+    def validate_and_promote(self):
+        """
+        Evalúa entradas en working_buffer.
+        Promueve a semantic_library si utility_score > umbral o pasaron auto-examen.
+        """
+        try:
+            results = self.working_buffer.get(include=["metadatas", "documents"])
+            docs = results.get("documents", [])
+            metas = results.get("metadatas", [])
+            ids = results.get("ids", [])
+            
+            ids_to_promote = []
+            ids_to_prune = []
+            
+            for i, (doc, meta) in enumerate(zip(docs, metas)):
+                if meta is None:
+                    continue
+                
+                utility = meta.get("utility_score", 0.0)
+                validated = meta.get("validated", False)
+                
+                if utility > 0.6 or validated:
+                    # Promover a semantic_library
+                    self.semantic_collection.add(
+                        documents=[doc[:1000]],
+                        metadatas=[{
+                            **meta,
+                            "type": "external_knowledge",
+                            "source": "web_search_validated",
+                            "importance": 0.7,
+                        }],
+                        ids=[f"promoted_{ids[i]}"],
+                    )
+                    ids_to_promote.append(ids[i])
+                    print(f"   [WorkingBuffer] Promovido a semantic_library: {meta.get('query', '?')[:60]}")
+                else:
+                    # Podar entradas no usadas tras 24h
+                    ids_to_prune.append(ids[i])
+            
+            if ids_to_promote:
+                self.working_buffer.delete(ids=ids_to_promote)
+            if ids_to_prune:
+                self.working_buffer.delete(ids=ids_to_prune)
+                
+        except Exception as e:
+            print(f"   [!] Error en validate_and_promote: {e}")
+
+    def calculate_query_confidence(self, query: str) -> float:
+        """Evalúa si hay datos relevantes para una query en las colecciones."""
+        import re
+        
+        sem_results = self.query_semantic(query[:300], n_results=3)
+        proc_results = self.query_procedural(query[:300], n_results=3)
+        
+        query_terms = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', query.lower()))
+        
+        sem_relevant = 0
+        for r in sem_results:
+            content_terms = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', r.get("content", "").lower()))
+            if len(query_terms & content_terms) >= 3:
+                sem_relevant += 1
+        
+        proc_relevant = 0
+        for r in proc_results:
+            code_terms = set(re.findall(r'\b[a-zA-Z0-9]{4,}\b', r.get("code", "").lower()))
+            if len(query_terms & code_terms) >= 3:
+                proc_relevant += 1
+        
+        total = sem_relevant + proc_relevant
+        
+        if total == 0: return 0.1
+        elif total >= 3: return 0.8
+        elif total >= 1: return 0.5
+        return 0.3
 
 # ============================================
 # TEMPORAL FOCUS (Sistema de CPFdl Virtual)
@@ -657,14 +787,3 @@ def patch_episodic_memory_get_relevant(episodic_memory_instance):
 
     episodic_memory_instance.get_relevant = extended_get_relevant
     return episodic_memory_instance
-
-    def _sanitize_meta(self, meta: dict) -> dict:
-        clean = {}
-        for key, value in meta.items():
-            if value is None:
-                clean[key] = ""
-            elif isinstance(value, (str, int, float, bool)):
-                clean[key] = value
-            else:
-                clean[key] = str(value)
-        return clean
