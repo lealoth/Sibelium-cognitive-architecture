@@ -145,10 +145,11 @@ Pensamiento:"""
             force_web_search = False
 
         # Decisión final
-        if confidence < 0.45 or force_web_search:
-            web_context = self._fetch_web_for_thought(query_text)
+        if confidence < 0.45:
+            web_context = self._fetch_web_for_thought(active_summary[:200])
             if web_context:
-                replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
+                replay_context += f"\n\n[WEB DATA]:\n{web_context}"
+            replay_context += "\n\n[PROTOCOL: Use your full parametric knowledge. External data is supplementary.]"
 
         prompt = f"""--- HIPPOCAMPAL REPLAY ({network}) ---
     [ACTIVE THOUGHTS]: {active_summary}
@@ -247,10 +248,11 @@ Pensamiento:"""
             force_web_search = False
 
         # Decisión final
-        if confidence < 0.45 or force_web_search:
-            web_context = self._fetch_web_for_thought(query_text)
+        if confidence < 0.45:
+            web_context = self._fetch_web_for_thought(active_summary[:200])
             if web_context:
-                replay_context += f"\n\n[AUTO-SEARCHED]:\n{web_context}"
+                replay_context += f"\n\n[WEB DATA]:\n{web_context}"
+            replay_context += "\n\n[PROTOCOL: Use your full parametric knowledge. External data is supplementary]"
 
         # Query dinámico basado en el contexto activo
         try:
@@ -293,24 +295,14 @@ Pensamiento:"""
         self.fm._store_curiosity(enriched_thought)
     
     def _fetch_web_for_thought(self, query: str) -> str:
-        # Añadir contexto del dominio para desambiguar
-        domain_context = ""
-        if hasattr(self.fm, 'domain_filter'):
-            keywords = self.fm.domain_filter.get_keywords()[:5]
-            if keywords:
-                domain_context = " ".join(keywords)
-        
-        search_query = f"{query} {domain_context}" if domain_context else query
-        
+        """Busca en web usando el EnvironmentRegistry."""
         try:
-            from ddgs import DDGS
-            results = DDGS().text(search_query[:300], max_results=2)
-            if results:
-                snippets = [r.get("body", "")[:300] for r in results if r.get("body")]
-                return "\n".join(snippets) if snippets else ""
+            from core.environment_registry import EnvironmentRegistry
+            registry = EnvironmentRegistry.get_instance()
+            result = registry.parse_and_execute(f'<web_search query="{query}" />')
+            return result if result else ""
         except Exception:
-            pass
-        return ""
+            return ""
 
     def _regenerate_with_gemini(self, prompt_original: str, recuerdo_real: str, active_summary: str, tipo_tarea: str) -> str:
         """
@@ -635,38 +627,32 @@ Pensamiento:"""
         self.fm._store_curiosity(intention)
 
     def _auto_resolve_doubt(self, thought: str):
-        """
-        Filtro Epistémico: evalúa si la duda merece búsqueda web.
-        Si sí, abstrae a queries universales y busca.
-        """
-
+        """Filtro Epistémico: evalúa si la duda merece búsqueda web y la ejecuta vía EnvironmentRegistry."""
         import re
 
         # Detectar "Search for:" en el pensamiento
         search_match = re.search(r'Search for:\s*(.+?)(?:\n|$)', thought, re.IGNORECASE)
         if search_match:
             duda = search_match.group(1).strip()
-            print(f"   [AutoResearch] Search for detectado: '{duda}...'")
-        
-        questions = re.findall(r'[^.!?]*\?', thought)
-        if not questions:
-            return
-        
-        duda = questions[0][:200].strip()
+            print(f"   [AutoResearch] Search for detectado: '{duda[:80]}...'")
+        else:
+            questions = re.findall(r'[^.!?]*\?', thought)
+            if not questions:
+                return
+            duda = questions[0][:200].strip()
         
         # Verificar satiety
         if not self.fm.satiety.can_generate("web_search"):
             return
 
-        # Filtro de dominio dinámico: ¿es una duda técnica relevante para esta entidad?
+        # Filtro de dominio dinámico
         if hasattr(self.fm, 'domain_filter'):
             if not self.fm.domain_filter.is_technical(duda):
-                return  # No es una duda del dominio técnico de la entidad
+                return
         
-        # Fase 1: Evaluar relevancia con Filtro Epistémico
+        # Evaluar relevancia con Filtro Epistémico
         from core.perception.epistemic_filter import evaluar_y_formular_busqueda
         active_summary = self.fm.stream.get_all_active_summary()
-        
         evaluacion = evaluar_y_formular_busqueda(duda, active_summary[:300], self.fm.llm)
         
         if not evaluacion or not evaluacion.get("requiere_web"):
@@ -674,120 +660,50 @@ Pensamiento:"""
                 print(f"   [AutoResearch] Descartada: {evaluacion.get('razon', '')[:80]}")
             return
         
-        # Fase 2: Usar queries universales (abstraídas)
+        # Ejecutar búsqueda vía EnvironmentRegistry
         queries = evaluacion.get("queries_universales", [duda])
-
         depth_limit = evaluacion.get("profundidad_requerida", 2)
+        
         for query in queries[:depth_limit]:
             try:
-                from ddgs import DDGS
-                results = DDGS().text(query, max_results=2)
+                from core.environment_registry import EnvironmentRegistry
+                registry = EnvironmentRegistry.get_instance()
+                result = registry.parse_and_execute(f'<web_search query="{query}" />')
                 
-                if results:
-                    snippets = []
-                    for r in results:
-                        body = r.get("body", "")[:300]
-                        if body:
-                            snippets.append(body)
-                    
-                    if snippets:
-                        resolution = (
-                            f"[Auto-research] Duda original: {duda[:100]}\n"
-                            f"Query universal: {query}\n"
-                            f"Razón: {evaluacion.get('razon', '')}\n"
-                            f"Hallazgo: {' | '.join(snippets)}"
-                        )
-
-                        snippets_text = ' | '.join(snippets)
-
-                        # Auto-examen universal: generar síntesis para validar utilidad
-                        if snippets:
-                            snippets_text = ' | '.join(snippets)
-                            
-                            persona = self.fm.cognitive_loop.load_persona()
-                            name = persona.get("name", "La entidad")
-                            role = persona.get("role_type", "conversational")
-                            
-                            # Entregable según rol
-                            role_deliverables = {
-                                "self_engineer": "a clean refactoring proposal or executable code block",
-                                "researcher": "a formal technical hypothesis and its falsification method",
-                                "data_analyst": "a data-driven insight with metrics",
-                                "conversational": "a key takeaway for future interactions",
-                            }
-                            deliverable = role_deliverables.get(role, "a brief synthesis")
-                            
-                            exam_prompt = f"""[EPISTEMIC VALIDATION SYSTEM]
-                        You are evaluating external research quality for integration into permanent semantic memory.
-
-                        [WEB EVIDENCE]:
-                        {snippets_text[:800]}
-
-                        [TASK]:
-                        1. CRITIQUE: Evaluate if sources agree or if there are contradictions, obsolescence, or technical hallucinations in the snippets.
-                        2. COMPATIBILITY: Determine if this knowledge applies to your domain (Role: {role}) and technical environment.
-                        3. INTEGRATION SYNTHESIS: If valid and useful, generate {deliverable}. If irrelevant or contradictory, explicitly state why it must be rejected.
-
-                        Respond in {IDIOMA} with:
-                        - CONFIDENCE ASSESSMENT: [Approved / Rejected + Reason]
-                        - SEMANTIC DISTILLATE: [The clean, real knowledge ready for indexing]"""
-                            
-                            synthesis = self.fm.llm.generate(exam_prompt, temperature=0.3, max_tokens=250, purpose="sintesis_autoexamen")
-                            
-                            if synthesis and len(synthesis) > 30:
-                                # Solo guardar si fue aprobada
-                                if "APPROVED" in synthesis.upper() or "APROBADA" in synthesis.upper():
-                                    resolution += f"\n[Validated]: {synthesis[:400]}"
-                                else:
-                                    print(f"   [AutoResearch] Rechazada por auto-examen: {synthesis[:80]}...")
-                                    return  # No guardar, no inyectar en stream
-
-                        # Guardar en semantic_library
-                        try:
-                            self.fm.cognitive_loop.episodic_memory.store_semantic(
-                                content=resolution,
-                                metadata={
-                                    "source": "self_learning_cycle",
-                                    "type": "auto_research",
-                                    "topic": duda[:100],
-                                    "query": query,
-                                    "importance": 0.6,
-                                }
-                            )
-                            self.fm.satiety.register("web_search")
-                            print(f"   [AutoResearch] Indexado: {query[:60]}...")
-                        except Exception:
-                            pass
-                        
-                        # Incrementar utility_score en working_buffer si existe
-                        try:
-                            episodic = self.fm.cognitive_loop.episodic_memory
-                            existing = episodic.working_buffer.get(
-                                where={"query": query[:100]},
-                                include=["metadatas"]
-                            )
-                            if existing.get("ids") and existing.get("metadatas"):
-                                updated_metas = []
-                                for meta in existing["metadatas"]:
-                                    if meta:
-                                        meta["utility_score"] = min(1.0, meta.get("utility_score", 0.0) + 0.3)
-                                        meta["validated"] = True
-                                    updated_metas.append(meta)
-                                episodic.working_buffer.update(
-                                    ids=existing["ids"],
-                                    metadatas=updated_metas
-                                )
-                                print(f"   [WorkingBuffer] Utility +0.3 para: {query[:60]}...")
-                        except Exception:
-                            pass
-
-                        # Inyectar en stream
-                        from core.flow.flow_stream import ThoughtItem
-                        self.fm.stream.add_thought(ThoughtItem(
-                            content=f"[Aprendizaje] {resolution[:200]}",
-                            thought_type="learning",
-                            priority=0.6,
-                            source="auto_research"
-                        ))
+                if not result:
+                    continue
+                
+                resolution = (
+                    f"[Auto-research] Duda original: {duda[:100]}\n"
+                    f"Query universal: {query}\n"
+                    f"Razón: {evaluacion.get('razon', '')}\n"
+                    f"Hallazgo: {result[:500]}"
+                )
+                
+                # Guardar en semantic_library
+                try:
+                    self.fm.cognitive_loop.episodic_memory.store_semantic(
+                        content=resolution,
+                        metadata={
+                            "source": "self_learning_cycle",
+                            "type": "auto_research",
+                            "topic": duda[:100],
+                            "query": query,
+                            "importance": 0.6,
+                        }
+                    )
+                    self.fm.satiety.register("web_search")
+                    print(f"   [AutoResearch] Indexado: {query[:60]}...")
+                except Exception:
+                    pass
+                
+                # Inyectar en stream
+                from core.flow.flow_stream import ThoughtItem
+                self.fm.stream.add_thought(ThoughtItem(
+                    content=f"[Aprendizaje] {resolution[:200]}",
+                    thought_type="learning",
+                    priority=0.6,
+                    source="auto_research"
+                ))
             except Exception as e:
                 print(f"   [AutoResearch] Error búsqueda: {e}")

@@ -70,6 +70,20 @@ class SelfEngineer:
         print(f"   [SelfEngineer] Indexado: {file_path} ({fragments} fragmentos)")
         return f"Indexado: {fragments} fragmentos"
 
+    def get_repo_map(self) -> str:
+        """Mapeo estructural del repositorio (herramienta de Ada)."""
+        files_info = []
+        for file_path, file_data in sorted(self.reader.index.items()):
+            functions = file_data.get("functions", [])
+            classes = file_data.get("classes", [])
+            lines = file_data.get("lines", 0)
+            
+            summary = f"{len(classes)} clases, {len(functions)} funciones, {lines} líneas"
+            files_info.append(f"- {file_path}: {summary}")
+        
+        total = len(files_info)
+        return f"Repositorio Sibelium - {total} archivos indexados:\n" + "\n".join(files_info[:30])
+
     # ============================================
     # APRENDIZAJE POR REFUERZO
     # ============================================
