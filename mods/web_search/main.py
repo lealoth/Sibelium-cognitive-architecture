@@ -11,9 +11,6 @@ def setup(flow_manager):
         config = json.loads(mod_json.read_text(encoding="utf-8")).get("config", {})
     
     max_per_hour = config.get("max_searches_per_hour", 20)
-    auto_research_enabled = config.get("auto_research_enabled", True)
-    reactive_search_enabled = config.get("reactive_search_enabled", True)
-    
     search_count = 0
     search_reset = datetime.now()
     
@@ -21,7 +18,6 @@ def setup(flow_manager):
         """Handler para <web_search query="..." />"""
         nonlocal search_count, search_reset
         
-        # Resetear contador cada hora
         if (datetime.now() - search_reset).total_seconds() > 3600:
             search_count = 0
             search_reset = datetime.now()
@@ -33,42 +29,70 @@ def setup(flow_manager):
         if not query:
             return ""
         
+        return _execute_search(query, flow_manager)
+    
+    def _execute_search(query: str, fm) -> str:
+        """Ejecuta búsqueda web y guarda en semantic_library."""
+        nonlocal search_count
+        
+        # Optimizar query si es muy larga
+        search_query = _optimize_query(query, fm)
+        
         try:
             from ddgs import DDGS
-            results = DDGS().text(query, max_results=3)
+            results = DDGS().text(search_query, max_results=3)
             search_count += 1
             
             if results:
                 snippets = []
                 for r in results:
-                    title = r.get("title", "")[:100]
                     body = r.get("body", "")[:300]
                     if body:
-                        snippets.append(f"- {title}\n  {body}")
+                        snippets.append(body)
                 
                 result_text = "\n".join(snippets)
                 
-                # Si auto-research está activo, guardar en semantic_library
-                if auto_research_enabled:
-                    try:
-                        flow_manager.cognitive_loop.episodic_memory.store_semantic(
-                            content=f"[WebSearch] Query: {query}\nResultados:\n{result_text}",
-                            metadata={
-                                "source": "web_search",
-                                "type": "external_knowledge",
-                                "query": query[:100],
-                                "importance": 0.5,
-                            }
-                        )
-                    except Exception:
-                        pass
+                # Guardar en semantic_library
+                try:
+                    fm.cognitive_loop.episodic_memory.store_semantic(
+                        content=f"[WebSearch] Query: {search_query}\nResultados:\n{result_text}",
+                        metadata={
+                            "source": "web_search",
+                            "type": "external_knowledge",
+                            "query": search_query[:100],
+                            "importance": 0.5,
+                        }
+                    )
+                except Exception:
+                    pass
                 
-                print(f"   [WebSearch] '{query[:60]}...' → {len(snippets)} resultados")
+                print(f"   [WebSearch] '{search_query[:60]}...' → {len(snippets)} resultados")
                 return result_text
-            return "[WebSearch] Sin resultados."
+            return ""
         except Exception as e:
             print(f"   [WebSearch] Error: {e}")
-            return f"[WebSearch] Error: {e}"
+            return ""
+    
+    def _optimize_query(query: str, fm) -> str:
+        """Extrae keywords si la query es muy larga."""
+        if len(query) <= 200:
+            return query
+        
+        try:
+            extraction_prompt = f"""Extract 5-8 technical keywords or a short search phrase.
+Return ONLY the keywords/phrase, nothing else. Example: "Python Redis LRU cache implementation thread safe"
+
+Request: {query[:500]}
+
+Search phrase:"""
+            extracted = fm.llm.generate(
+                extraction_prompt, temperature=0.1, max_tokens=30, purpose="extraer_query"
+            )
+            if extracted and len(extracted) > 5:
+                return extracted.strip()
+        except Exception:
+            pass
+        return query[:200]
     
     # Registrar en EnvironmentRegistry
     try:
@@ -78,14 +102,6 @@ def setup(flow_manager):
         print(f"   [WebSearch] Herramienta <web_search> registrada.")
     except Exception as e:
         print(f"   [WebSearch] Error registrando herramienta: {e}")
-    
-    # Registrar hooks para auto-research en pensamientos de fondo
-    if auto_research_enabled:
-        def on_fast_tick(fm):
-            # El auto-research se activa desde flow_thoughts._auto_resolve_doubt()
-            pass
-        
-        flow_manager._mod_hooks["on_fast_tick"].append(on_fast_tick)
     
     return handle_web_search
 

@@ -67,6 +67,17 @@ def setup(flow_manager):
         
         print("   [SelfEngineer] Codebase indexed.")
     
+    # Registrar herramienta de mapeo de repositorio
+    def handle_repo_map(params: dict) -> str:
+        return engineer.get_repo_map()
+    
+    try:
+        from core.environment_registry import EnvironmentRegistry
+        EnvironmentRegistry.get_instance().register("repo_map", handle_repo_map)
+        print("   [SelfEngineer] Herramienta <repo_map> registrada.")
+    except Exception as e:
+        print(f"   [SelfEngineer] Error registrando repo_map: {e}")
+
     def on_slow_tick(fm):
         nonlocal last_run
         now = datetime.now()

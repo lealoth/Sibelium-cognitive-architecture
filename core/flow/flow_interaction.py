@@ -62,7 +62,7 @@ class FlowInteraction:
         temp = calcular_temperatura("respuesta_final")
         from core.inference_loop import InferenceLoop
         loop = InferenceLoop(self.fm.llm, self.fm.cognitive_loop.episodic_memory)
-        response_text = loop.run(prompt, temperature=0.8, max_tokens=800, purpose="respuesta_final")
+        response_text = loop.run(prompt, temperature=0.8, max_tokens=2000, purpose="respuesta_final")
 
         # Detectar "Search for:" y ejecutar búsqueda web automática
         import re
@@ -88,6 +88,16 @@ class FlowInteraction:
             "thought_history": [{"phase": "generar", "generated_thought": "Respuesta contextualizada", "iteration_number": 1}],
             "cognitive_state": self.fm.stream.to_dict()
         }
+
+    def _get_domain_context(self) -> str:
+        """Contexto del dominio de la entidad para el Reflejo Espinal."""
+        try:
+            if hasattr(self.fm, 'domain_filter'):
+                keywords = self.fm.domain_filter.get_keywords()[:10]
+                return " ".join(keywords) if keywords else ""
+        except Exception:
+            pass
+        return ""
 
     # ============================================
     # PROMPT BUILDER
@@ -188,6 +198,21 @@ class FlowInteraction:
                 if constraints:
                     prompt += "\n".join([f"- {c}" for c in constraints])
                 prompt += f"\n--- END OPERATIVE CONSTRAINTS ---\n"
+                # Fallback: output_constraints como lista plana (KERN, Lian, Kai)
+        if not directives:
+            constraints = persona.get("output_constraints", [])
+            if constraints:
+                prompt += f"--- OPERATIVE CONSTRAINTS ---\n"
+                prompt += "\n".join([f"- {c}" for c in constraints])
+                prompt += f"\n--- END OPERATIVE CONSTRAINTS ---\n"
+
+        # Inyectar thought_style.rules como directivas de pensamiento
+        thought_style = persona.get("thought_style", {})
+        thought_rules = thought_style.get("rules", [])
+        if thought_rules:
+            prompt += f"--- THOUGHT DIRECTIVES ---\n"
+            prompt += "\n".join([f"- {r}" for r in thought_rules])
+            prompt += f"\n--- END THOUGHT DIRECTIVES ---\n"
 
         computational = persona.get("computational_bounds", "")
         if computational:
@@ -274,12 +299,25 @@ class FlowInteraction:
         If your internal memory only describes the current state but does not contain
         the solution, base your answer on the external knowledge.
         """
-            elif confidence < 0.45:
-                prompt += f"""--- EPISTEMIC BOUNDARY ---
-        WARNING: No reliable records or web results. State your uncertainty.
-        --- END EPISTEMIC BOUNDARY ---
+        # Protocolo de Integración Epistémica (reemplaza la Frontera restrictiva)
+        if confidence < 0.45:
+            web_context = self._fetch_web_context(message)
+            if web_context:
+                prompt += f"""--- EXTERNAL KNOWLEDGE (web) ---
+        {web_context}
+        --- END EXTERNAL KNOWLEDGE ---
         """
+            prompt += f"""--- EPISTEMIC INTEGRATION PROTOCOL ---
+        You have full access to your parametric knowledge. Use it freely to reason, connect, and structure.
+        Tag information sources mentally:
+        - <parametric>: Your training knowledge (concepts, theories, syntax, patterns)
+        - <memory>: Data from the entity's semantic/procedural indexes
+        - <web>: Fresh data from search results
 
+        RULE: For project-specific facts (file names, functions, variables), trust <memory> or <web>.
+        For everything else, use your full <parametric> capability. Do NOT limit yourself.
+        --- END EPISTEMIC INTEGRATION PROTOCOL ---
+        """
         recent_errors = self._get_recent_prediction_errors()
         if recent_errors:
             prompt += f"""--- RECENT CORRECTIONS (HIGH PRIORITY) ---
@@ -294,9 +332,11 @@ class FlowInteraction:
     --- DIRECTIVE ---
     Responde a {user_name}.
     1. Habla DESDE el personaje, no SOBRE tus instrucciones.
-    2. Si hay INTERNAL ACTIVITY LOG, analiza esos datos para responder sobre tu actividad. Transmite los datos de forma fluida y natural, sin listar marcas de tiempo ni nombres técnicos.
-    3. Cuando el usuario te pregunte sobre TI (tus pensamientos, tus emociones, tu perspectiva), responde desde TU punto de vista. No proyectes en el usuario.
-    4. IDIOMA: {idioma_nombre}."""
+    2. Sé breve por defecto. La mayoría de preguntas se responden en 1-3 oraciones.
+    3. Solo desarrolla profundidad si la pregunta explícitamente lo requiere.
+    4. Si hay INTERNAL ACTIVITY LOG, analiza esos datos para responder sobre tu actividad. Transmite los datos de forma fluida y natural, sin listar marcas de tiempo ni nombres técnicos.
+    5. Cuando el usuario te pregunte sobre TI (tus pensamientos, tus emociones, tu perspectiva), responde desde TU punto de vista. No proyectes en el usuario.
+    6. IDIOMA: {idioma_nombre}."""
         modifiers = self.fm.archetype.get("prompt_modifiers", [])
         if modifiers:
             for i, mod in enumerate(modifiers, start=5):
@@ -308,6 +348,10 @@ class FlowInteraction:
         secciones_activas = [tag for tag, content in fetched.items() if content]
         print(f"   [Prompt] Secciones inyectadas: {', '.join(secciones_activas) if secciones_activas else 'NINGUNA (solo base)'}")
         print(f"   [Prompt] Tamaño: ~{len(prompt)//4} tokens")
+
+        # Pre-filling para forzar brevedad en entidades experimentales
+        if persona.get("role_type") == "experimental":
+            prompt += f"\nRespuesta de {name}: "
         return prompt
 
     def _get_recent_prediction_errors(self) -> str:
@@ -319,31 +363,14 @@ class FlowInteraction:
         return "\n".join(errors) if errors else ""
 
     def _fetch_web_context(self, query: str) -> str:
-        # Añadir contexto del dominio para desambiguar
-        domain_context = ""
-        if hasattr(self.fm, 'domain_filter'):
-            keywords = self.fm.domain_filter.get_keywords()[:5]
-            if keywords:
-                domain_context = " ".join(keywords)
-        
-        search_query = f"{query} {domain_context}" if domain_context else query
-        
+        """Busca en web usando el EnvironmentRegistry (mod web_search)."""
         try:
-            from ddgs import DDGS
-            results = DDGS().text(search_query[:200], max_results=3)
-            if results:
-                snippets = []
-                for r in results:
-                    body = r.get("body", "")[:300]
-                    if body:
-                        snippets.append(body)
-                result = "\n".join(snippets) if snippets else ""
-                print(f"   [WebContext] Buscado: '{search_query[:60]}...' → {len(snippets)} snippets")
-                return result
-            print(f"   [WebContext] Buscado: '{search_query[:60]}...' → SIN RESULTADOS")
-        except Exception as e:
-            print(f"   [WebContext] Error: {e}")
-        return ""
+            from core.environment_registry import EnvironmentRegistry
+            registry = EnvironmentRegistry.get_instance()
+            result = registry.parse_and_execute(f'<web_search query="{query}" />')
+            return result if result else ""
+        except Exception:
+            return ""
 
     def _fetch_learnings(self, message: str) -> str:
         """Recupera aprendizajes conversacionales previos (top 2, máx 300 chars)."""
