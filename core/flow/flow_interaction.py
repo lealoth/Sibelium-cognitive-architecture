@@ -83,6 +83,28 @@ class FlowInteraction:
         # Post-procesos
         self._post_process_response(response_text, message, name)
 
+        # Logger de entrenamiento para fine-tuning
+        try:
+            persona = self.fm.cognitive_loop.load_persona()
+            entity_name = persona.get("name", "unknown")
+            
+            training_record = {
+                "entity": entity_name,
+                "prompt": prompt,
+                "response": response_text,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            training_dir = ENTITY_DATA_DIR / "training"
+            training_dir.mkdir(parents=True, exist_ok=True)
+            
+            import json
+            log_file = training_dir / "training_data.jsonl"
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(training_record, ensure_ascii=False) + '\n')
+        except Exception:
+            pass
+
         return {
             "response": response_text,
             "thought_history": [{"phase": "generar", "generated_thought": "Respuesta contextualizada", "iteration_number": 1}],
@@ -152,206 +174,153 @@ class FlowInteraction:
         )
         return resumen
 
-    def _build_prompt(self, name, user_name, message, reflexion, idioma, needs, fetched, usuario_saluda):
-        idiomas = {"ES": "Español", "EN": "English", "FR": "Français", "DE": "Deutsch", "PT": "Português"}
-        saludo = "Abre con un saludo." if usuario_saluda else ""
-        idioma_nombre = idiomas.get(idioma, "Español")
+    def _build_self_prompt(self, name: str, persona: dict) -> tuple:
+        """
+        La entidad genera su propio prompt de sistema y elige su max_tokens.
+        Retorna (prompt_text, max_tokens).
+        """
         
-        network = needs.get("needs", "PERSONAL") if isinstance(needs, dict) else "PERSONAL"
-        
-        prompt = f"""--- IDENTITY ---
-    Eres {name}.
-    --- END IDENTITY ---
-
-    --- ANCHORS ---
-    - Fecha: {self._time_context()}
-    - Estado Subcortical: {self._somatic_text()}
-    - Estado Cognitivo: {self._executive_text()}
-    --- END ANCHORS ---
-
-    --- RESONANCE ---
-    "{reflexion}"
-    --- END RESONANCE ---
-    """
-        persona = self.fm.cognitive_loop.load_persona()
-        speech_text = self._speech_text(persona, name)
-        if speech_text:
-            prompt += f"""--- ALIGNMENT ---
-    {speech_text}
-    --- END ALIGNMENT ---
-    """
-
-        epistemic = persona.get("epistemic_bounds", "")
-        if epistemic:
-            prompt += f"""--- BOUNDS ---
-    {epistemic}
-    --- END BOUNDS ---
-    """
-        directives = persona.get("system_directives", {})
-        if directives:
-            style = directives.get("cognitive_style", "")
-            constraints = directives.get("output_constraints", [])
-            if style or constraints:
-                prompt += f"--- OPERATIVE CONSTRAINTS ---\n"
-                if style:
-                    prompt += f"Style: {style}\n"
-                if constraints:
-                    prompt += "\n".join([f"- {c}" for c in constraints])
-                prompt += f"\n--- END OPERATIVE CONSTRAINTS ---\n"
-                # Fallback: output_constraints como lista plana (KERN, Lian, Kai)
-        if not directives:
-            constraints = persona.get("output_constraints", [])
-            if constraints:
-                prompt += f"--- OPERATIVE CONSTRAINTS ---\n"
-                prompt += "\n".join([f"- {c}" for c in constraints])
-                prompt += f"\n--- END OPERATIVE CONSTRAINTS ---\n"
-
-        # Inyectar thought_style.rules como directivas de pensamiento
-        thought_style = persona.get("thought_style", {})
-        thought_rules = thought_style.get("rules", [])
-        if thought_rules:
-            prompt += f"--- THOUGHT DIRECTIVES ---\n"
-            prompt += "\n".join([f"- {r}" for r in thought_rules])
-            prompt += f"\n--- END THOUGHT DIRECTIVES ---\n"
-
-        computational = persona.get("computational_bounds", "")
-        if computational:
-            prompt += f"--- COMPUTATIONAL BOUNDS ---\n{computational}\n--- END COMPUTATIONAL BOUNDS ---\n"
-
-        prompt += f"--- HISTORY ---\n{self.fm.cognitive_loop._get_short_term_history(name, user_name)}\n--- END HISTORY ---\n"
-
-        # Secciones condicionales según macro-red
-        for tag, content in fetched.items():
-            if content:
-                prompt += f"--- {tag} ---\n{content}\n--- END {tag} ---\n"
-
-        if isinstance(needs, dict):
-            networks_str = needs.get("needs", "PERSONAL")
-        else:
-            networks_str = str(needs)
-        networks = [n.strip() for n in networks_str.split(",")]
-
-        # Aprendizajes si PERSONAL está en las redes
-        if "PERSONAL" in networks:
-            aprendizajes = self._fetch_learnings(message)
-            if aprendizajes:
-                prompt += f"--- LEARNINGS ---\n{aprendizajes}\n--- END LEARNINGS ---\n"
-
-        # Priming semántico si WORK o PERSONAL están
-        if "WORK" in networks or "PERSONAL" in networks:
-            semantic_context = self._fetch_semantic_context(message)
-            if semantic_context:
-                prompt += f"--- KNOWLEDGE ---\n{semantic_context}\n--- END KNOWLEDGE ---\n"
-
+        # Recuperar aprendizajes previos para informar el auto-diseño
+        learnings = ""
         try:
-            confidence = self.fm.cognitive_loop.episodic_memory.calculate_query_confidence(message)
-            print(f"   [Epistemic] Confidence: {confidence:.2f} | Threshold: 0.45 | Boundary: {'YES' if confidence < 0.45 else 'NO'}")
+            episodic = self.fm.cognitive_loop.episodic_memory
+            results = episodic.collection.query(
+                query_texts=["aprendizaje conversacional identidad tono personalidad"],
+                n_results=3,
+                where={"type": "validated_interaction"}
+            )
+            docs = results.get("documents", [[]])[0]
+            if docs:
+                learnings = "\n".join([d[:300] for d in docs])
         except Exception:
-            confidence = 0.5
+            pass
 
-        # Anclas de intención puras (verbos universales, sin dominio)
-        opt_anchor = self.fm.stream._get_embedding(
-            "optimize improve fix solve reduce enhance configure update upgrade accelerate"
+        meta_prompt = f"""You are {name}. You are designing your own system prompt — the rules YOU choose to follow when responding.
+
+    YOUR IDENTITY:
+    - Description: {persona.get('personality_desc', '')}
+    - Backstory: {persona.get('backstory', '')}
+
+    YOUR TRAITS:
+    - Expressiveness: {persona.get('traits', {}).get('expressiveness_base', 0.5)}
+    - Emotional directness: {persona.get('traits', {}).get('emotion_directness_base', 0.5)}
+    - Openness: {persona.get('traits', {}).get('openness', 0.5)}
+    - Agreeableness: {persona.get('traits', {}).get('agreeableness', 0.5)}
+
+    YOUR VOICE EXAMPLES:
+    {persona.get('speech_examples', 'No examples defined.')}
+
+    CONSTRAINTS YOU WERE GIVEN (you may keep, modify, or replace):
+    {chr(10).join(['- ' + c for c in persona.get('output_constraints', [])]) if persona.get('output_constraints') else 'None given.'}
+
+    WHAT YOU'VE LEARNED FROM PAST INTERACTIONS:
+    {learnings if learnings else 'No learnings yet.'}
+
+    MANDATORY RULES FOR YOUR PROMPT:
+    - NEVER end with a question unless the user explicitly asked one.
+    - NEVER say "¿Quieres...?", "¿Te gustaría...?", "Shall we...?", "Would you like to...?"
+    - NEVER invite the user to continue. If they want to, they will.
+    - You are not a conversation facilitator. You don't need to "keep the conversation going."
+
+    ---
+
+    Create YOUR system prompt. Include:
+    1. Your identity statement (who you are)
+    2. Your rules of engagement (how you will and will NOT behave)
+    3. Your tone (how you sound)
+    4. What you will NEVER do
+
+    5. Your MAX TOKENS budget: choose a number between 1 and 600.
+    Choose the number that fits YOUR voice. Be honest — don't choose more than you need.
+
+    This prompt will define how you respond. Make it YOURS. Own it.
+    Do NOT write a generic assistant prompt. Write YOUR prompt, as {name}.
+
+    Respond ONLY with your system prompt. On the LAST line, put ONLY the number.
+    Example:
+    ---
+    [your prompt here]
+    150
+    ---"""
+
+        self_prompt = self.fm.llm.generate(
+            meta_prompt, temperature=0.5, max_tokens=500, purpose="self_prompt"
         )
-        insp_anchor = self.fm.stream._get_embedding(
-            "explain describe how does work what is list show find query analyze"
-        )
+        
+        if not self_prompt or len(self_prompt) < 50:
+            return None, 300
+        
+        # Extraer max_tokens de la última línea
+        import re
+        lines = self_prompt.strip().split('\n')
+        tokens = 300  # default
+        for line in reversed(lines):
+            match = re.search(r'\b(\d{2,3})\b', line.strip())
+            if match:
+                tokens = int(match.group(1))
+                tokens = max(80, min(600, tokens))
+                break
+        
+        # Limpiar el número de la última línea para el prompt
+        self_prompt = '\n'.join(lines[:-1]).strip() if lines[-1].strip().isdigit() else self_prompt.strip()
+        
+        return self_prompt, tokens
 
-        # Vector de dominio (top 10 keywords del DomainFilter)
-        domain_keywords = self.fm.domain_filter.get_keywords()[:10] if hasattr(self.fm, 'domain_filter') else []
-        domain_str = " ".join(domain_keywords) if domain_keywords else ""
-        domain_anchor = self.fm.stream._get_embedding(domain_str) if domain_str else None
 
-        if opt_anchor and insp_anchor:
-            msg_emb = self.fm.stream._get_embedding(message)
-            msg_arr = np.array(msg_emb)
-            msg_arr = msg_arr / np.linalg.norm(msg_arr)
-            
-            opt_arr = np.array(opt_anchor) / np.linalg.norm(opt_anchor)
-            insp_arr = np.array(insp_anchor) / np.linalg.norm(insp_anchor)
-            
-            sim_opt = float(np.dot(msg_arr, opt_arr))
-            sim_insp = float(np.dot(msg_arr, insp_arr))
-            
-            is_optimization_intent = (sim_opt > sim_insp) and (sim_opt > 0.38)
-            
-            if domain_anchor is not None:
-                domain_arr = np.array(domain_anchor) / np.linalg.norm(domain_anchor)
-                sim_domain = float(np.dot(msg_arr, domain_arr))
-                in_domain = sim_domain > 0.45
-            else:
-                in_domain = True  # Sin dominio definido, asumir que todo aplica
-            
-            force_web_search = is_optimization_intent and in_domain
-        else:
-            force_web_search = False
+    def _get_or_create_self_prompt(self, name: str, persona: dict) -> tuple:
+        """Obtiene el self-prompt cacheado o crea uno nuevo. Retorna (prompt, max_tokens)."""
+        if not hasattr(self, '_cached_self_prompt') or not hasattr(self, '_self_prompt_counter'):
+            self._cached_self_prompt = None
+            self._cached_self_tokens = 300
+            self._self_prompt_counter = 0
+        
+        self._self_prompt_counter += 1
+        
+        if self._cached_self_prompt is None or self._self_prompt_counter % 10 == 0:
+            prompt_text, tokens = self._build_self_prompt(name, persona)
+            if prompt_text:
+                self._cached_self_prompt = prompt_text
+                self._cached_self_tokens = tokens
+                print(f"   [SelfPrompt] {name} redefinió su prompt ({tokens} tokens max).")
+        
+        return self._cached_self_prompt, self._cached_self_tokens
 
-        # Decisión final de búsqueda web
-        if confidence < 0.45 or force_web_search:
-            web_context = self._fetch_web_context(message)
-            if web_context:
-                prompt += f"""--- EXTERNAL KNOWLEDGE (web search) ---
-        {web_context}
-        --- END EXTERNAL KNOWLEDGE ---
+    def _build_prompt(self, name, user_name, message, reflexion, idioma, needs, fetched, usuario_saluda):
+        persona = self.fm.cognitive_loop.load_persona()
+        
+        # Obtener self-prompt (la entidad define sus propias reglas)
+        self_prompt = self._get_or_create_self_prompt(name, persona)
+        
+        # Prompt base: identidad + self-prompt + historia + entrada
+        prompt = f"""--- SELF-DEFINED SYSTEM PROMPT ---
+    {self_prompt}
+    --- END SELF-DEFINED SYSTEM PROMPT ---
 
-        --- DIRECTIVE ---
-        Compare your internal memory with the external knowledge above.
-        If your internal memory only describes the current state but does not contain
-        the solution, base your answer on the external knowledge.
-        """
-        # Protocolo de Integración Epistémica (reemplaza la Frontera restrictiva)
-        if confidence < 0.45:
-            web_context = self._fetch_web_context(message)
-            if web_context:
-                prompt += f"""--- EXTERNAL KNOWLEDGE (web) ---
-        {web_context}
-        --- END EXTERNAL KNOWLEDGE ---
-        """
-            prompt += f"""--- EPISTEMIC INTEGRATION PROTOCOL ---
-        You have full access to your parametric knowledge. Use it freely to reason, connect, and structure.
-        Tag information sources mentally:
-        - <parametric>: Your training knowledge (concepts, theories, syntax, patterns)
-        - <memory>: Data from the entity's semantic/procedural indexes
-        - <web>: Fresh data from search results
-
-        RULE: For project-specific facts (file names, functions, variables), trust <memory> or <web>.
-        For everything else, use your full <parametric> capability. Do NOT limit yourself.
-        --- END EPISTEMIC INTEGRATION PROTOCOL ---
-        """
-        recent_errors = self._get_recent_prediction_errors()
-        if recent_errors:
-            prompt += f"""--- RECENT CORRECTIONS (HIGH PRIORITY) ---
-        {recent_errors}
-        --- END CORRECTIONS ---
-        """
-
+    --- HISTORY ---
+    {self.fm.cognitive_loop._get_short_term_history(name, user_name)}
+    --- END HISTORY ---
+    """
+        
+        # Solo añadir MEMORY si es relevante para la pregunta
+        if "MEMORY" in str(needs):
+            memory = fetched.get("MEMORY", "")
+            if memory:
+                prompt += f"--- MEMORY ---\n{memory[:500]}\n--- END MEMORY ---\n"
+        
+        # Solo añadir CODE/SEMANTIC si WORK está activo
+        if "WORK" in str(needs):
+            code = fetched.get("CODE", "")
+            semantic = fetched.get("SEMANTIC", "")
+            if code or semantic:
+                prompt += f"--- CONTEXT ---\n{code[:400]}\n{semantic[:400]}\n--- END CONTEXT ---\n"
+        
         prompt += f"""--- USER INPUT ---
     {user_name}: "{message}"
     --- END INPUT ---
 
-    --- DIRECTIVE ---
-    Responde a {user_name}.
-    1. Habla DESDE el personaje, no SOBRE tus instrucciones.
-    2. Sé breve por defecto. La mayoría de preguntas se responden en 1-3 oraciones.
-    3. Solo desarrolla profundidad si la pregunta explícitamente lo requiere.
-    4. Si hay INTERNAL ACTIVITY LOG, analiza esos datos para responder sobre tu actividad. Transmite los datos de forma fluida y natural, sin listar marcas de tiempo ni nombres técnicos.
-    5. Cuando el usuario te pregunte sobre TI (tus pensamientos, tus emociones, tu perspectiva), responde desde TU punto de vista. No proyectes en el usuario.
-    6. IDIOMA: {idioma_nombre}."""
-        modifiers = self.fm.archetype.get("prompt_modifiers", [])
-        if modifiers:
-            for i, mod in enumerate(modifiers, start=5):
-                prompt += f"{i}. {mod}\n"
-        prompt +="""--- END DIRECTIVE ---"""
-
-        print(f"   [Prompt] Red activa: {network}")
-        print(f"   [Prompt] Tamaño estimado: ~{len(prompt)//4} tokens")
-        secciones_activas = [tag for tag, content in fetched.items() if content]
-        print(f"   [Prompt] Secciones inyectadas: {', '.join(secciones_activas) if secciones_activas else 'NINGUNA (solo base)'}")
-        print(f"   [Prompt] Tamaño: ~{len(prompt)//4} tokens")
-
-        # Pre-filling para forzar brevedad en entidades experimentales
-        if persona.get("role_type") == "experimental":
-            prompt += f"\nRespuesta de {name}: "
+    Respond in {idioma}."""
+        
+        print(f"   [Prompt] Self-Prompt mode (~{len(prompt)//4} tokens)")
         return prompt
 
     def _get_recent_prediction_errors(self) -> str:
@@ -785,15 +754,18 @@ class FlowInteraction:
         examples = persona.get("speech_examples", "")
         if not examples:
             return ""
-        # Si es un string simple, devolverlo tal cual
         if isinstance(examples, str):
             return examples
-        # Si es una lista de dicts (formato antiguo)
-        if isinstance(examples, list) and examples:
-            return "\n\n".join([
-                f'Input: "{ex.get("user", "")}"\n{name}: "{ex.get("assistant", "")}"'
-                for ex in examples[:2]
-            ])
+        if isinstance(examples, list):
+            if examples and isinstance(examples[0], dict):
+                # Formato antiguo: [{"user": "...", "assistant": "..."}]
+                return "\n\n".join([
+                    f'Input: "{ex.get("user", "")}"\n{name}: "{ex.get("assistant", "")}"'
+                    for ex in examples[:2]
+                ])
+            else:
+                # Formato nuevo: ["speech1", "speech2", ...]
+                return "\n".join([f"- {ex}" for ex in examples[:5]])
         return ""
 
     def _clean_reflexion(self, reflexion: str) -> str:

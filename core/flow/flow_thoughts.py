@@ -70,6 +70,9 @@ Pensamiento:"""
 
         self.fm.maintenance._consolidate_reflection(enriched_thought, "reflection")
 
+        enriched_thought = self._enrich_thought_with_context(thought, "reflection", None)
+        self._log_training_data(prompt, enriched_thought, "reflection")
+
     
     def _generate_curiosity(self):
         if self.fm.last_message_time:
@@ -166,6 +169,9 @@ Pensamiento:"""
         
         self.fm.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="curiosity", priority=0.5, source="internal"))
         self.fm.last_thought_time = datetime.now() 
+
+        enriched_thought = self._enrich_thought_with_context(thought, "curiosity")
+        self._log_training_data(prompt, enriched_thought, "curiosity")
 
         # Detectar duda epistémica y auto-responder con búsqueda web
         if "?" in enriched_thought and self.fm.satiety.can_generate("web_search"):
@@ -289,7 +295,9 @@ Pensamiento:"""
         thought = self.fm.llm.generate(prompt, temperature=temp, max_tokens=120, purpose="simulacion_fondo")
         enriched_thought = self._enrich_thought_with_context(thought, "simulation", None)
         
-        
+        enriched = self._enrich_thought_with_context(thought, "simulation", None)
+        self._log_training_data(prompt, enriched, "simulation")
+
         self.fm.stream.add_thought(ThoughtItem(content=enriched_thought, thought_type="simulation", priority=0.5, source="internal"))
         self.fm.last_thought_time = datetime.now()
         self.fm._store_curiosity(enriched_thought)
@@ -591,8 +599,39 @@ Pensamiento:"""
             priority=0.45,
             source="internal"
         ))
+        enriched = self._enrich_thought_with_context(thought, "prospection", None)
+        self._log_training_data(prompt, enriched, "prospection")
+
         self.fm.last_thought_time = datetime.now()
         self.fm._store_curiosity(f"[Prospección] {enriched_thought}")
+
+    def _log_training_data(self, prompt: str, response: str, thought_type: str):
+        """Guarda pensamientos internos para fine-tuning."""
+        try:
+            import json
+            from datetime import datetime
+            from config import ENTITY_DATA_DIR
+            
+            persona = self.fm.cognitive_loop.load_persona()
+            entity_name = persona.get("name", "unknown")
+            
+            training_dir = ENTITY_DATA_DIR / "training"
+            training_dir.mkdir(parents=True, exist_ok=True)
+            
+            record = {
+                "entity": entity_name,
+                "type": "internal_monologue",
+                "thought_type": thought_type,
+                "prompt": prompt,
+                "response": response,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            log_file = training_dir / "training_data.jsonl"
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+        except Exception:
+            pass
 
     def _get_replay_context(self, active_summary: str, prefer_code: bool = False) -> str:
         """Obtiene contexto para Hippocampal Replay según la red activada."""
