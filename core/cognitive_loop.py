@@ -230,6 +230,25 @@ class CognitiveLoop:
             outcome = self.evaluate_conversational_outcome(message, response)
             self.consolidate_conversational_learning(message, response, outcome)
 
+            # Disparar fine-tuning cada 20 interacciones
+            if self.interaction_count > 0 and self.interaction_count % 20 == 0:
+                import subprocess
+                from pathlib import Path
+                from config import MODEL_PATH
+                
+                persona = self.load_persona()
+                entity_name = persona.get("name", "unknown")
+                training_dir = self.flow_manager.ENTITY_DATA_DIR / "training" if hasattr(self.flow_manager, 'ENTITY_DATA_DIR') else ENTITY_DATA_DIR / "training"
+                data_path = training_dir / "training_data.jsonl"
+                output_path = Path("models") / f"{entity_name}_v{self.interaction_count}.gguf"
+                base_model = str(MODEL_PATH)
+                
+                print(f"   [FineTune] Iniciando fine-tuning para {entity_name}...")
+                subprocess.Popen([
+                    "python", "scripts/finetune.py",
+                    entity_name, base_model, str(data_path), str(output_path)
+                ])
+
         except Exception as e:
             print(f"⚠️ Error en post-procesamiento diferido: {e}")
 
