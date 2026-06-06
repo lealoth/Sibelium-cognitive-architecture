@@ -17,13 +17,13 @@ GPU_LAYERS_MAIN = 32       # La mitad de las ~32 capas de Llama 8B a GPU
 GPU_BACKEND = "vulkan"
 
 # Backend: "local", "cloud", o "hybrid".
-LLM_BACKEND = "local"
+LLM_BACKEND = "hybrid"
 
 # Cloud API (compatible con OpenAI)
-CLOUD_API_KEY = "your-api.key"  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
-CLOUD_MODEL_FREE = "llama-3.1-70b-versatile" # Modelo gratuito en la nube para tareas simples o como respaldo cuando el premium no está disponible
+CLOUD_API_KEY = "api-key"  # Tu API key de modelo en la nube principal (asegúrate de mantenerla segura y no exponerla públicamente)
+CLOUD_MODEL_FREE = "llama-3.3-70b-versatile" # Modelo gratuito en la nube para tareas simples o como respaldo cuando el premium no está disponible
 CLOUD_MODEL_PREMIUM = "llama-3.3-70b-versatile" # Modelo premium en la nube para tareas complejas o cuando el local no es suficiente, se recomienda usar un modelo con buena capacidad de razonamiento y comprensión contextual para complementar al local
-CLOUD_API_URL = "api-url"  # "https://api.openai.com", etc.
+CLOUD_API_URL = "https://api.groq.com/openai/v1"  # o "https://api.openai.com", etc.
 
 # Personalidad
 MAX_PERSONALITY_RETRIES = 3 # Cuántas veces intentar ajustar la personalidad antes de rendirse, no está integrado en el código aun.
@@ -49,7 +49,7 @@ RESPONSE_TEMPERATURE = 0.7
 MAX_VERIFICATION_RETRIES = 1
 
 # Archivos de datos
-ENTITY_DATA_DIR = BASE_DIR / "entitys" / "entity_data_ada"  # Cambia "entity_data_nexus" por "entity_data_ada" para la otra entidad
+ENTITY_DATA_DIR = BASE_DIR / "entitys" / "entity_data_qia"  # Cambia "entity_data_nexus" por "entity_data_ada" para la otra entidad
 PERSONA_FILE = ENTITY_DATA_DIR / "identity" / "persona.json"
 USERS_DIR = ENTITY_DATA_DIR / "memory" / "users"
 SELF_STATE_FILE = ENTITY_DATA_DIR / "memory" / "self_state.json"
@@ -73,7 +73,7 @@ PROACTIVE_QUIET_HOURS_START = 22  # Hora en que deja de enviar mensajes (22 = 10
 PROACTIVE_QUIET_HOURS_END = 8     # Hora en que vuelve a enviar mensajes (8 = 8 AM)
 
 # Mods activos
-ENABLED_MODS = ["self_engineer"]  # ["self_engineer"] para activar
+ENABLED_MODS = []  # ["self_engineer"] para activar
 # ENABLED_MODS_NEXUS = ["director", "team_channel", "self_engineer"]
 # ENABLED_MODS_ADA = ["team_channel", "self_engineer"]
 
