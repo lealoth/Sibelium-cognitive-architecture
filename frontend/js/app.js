@@ -49,13 +49,13 @@ document.addEventListener('DOMContentLoaded', () => {
   btnReopenSidebar.addEventListener('click', () => {
     sessionsSidebar.classList.remove('collapsed');
     btnToggleSessions.textContent = '◀';
-});
+  });
 
   // ============================================
   // GESTIÓN DE SESIONES
   // ============================================
 
-async function loadSessions() {
+  async function loadSessions() {
     try {
       const res = await fetch('/api/sessions');
       const data = await res.json();
@@ -307,7 +307,7 @@ async function loadSessions() {
         fileInput.value = ''; return;
       }
       if (file.size > MAX_FILE_SIZE) {
-        appendMessage('assistant', `Archivo demasiado grande. Max: ${MAX_FILE_SIZE/1024/1024}MB.`);
+        appendMessage('assistant', `Archivo demasiado grande. Max: ${MAX_FILE_SIZE / 1024 / 1024}MB.`);
         fileInput.value = ''; return;
       }
       pendingFile = file;
@@ -396,14 +396,14 @@ async function loadSessions() {
   }
 
   function updateAssistantMessage(text) {
-      const thinking = document.querySelector('.message-assistant.thinking');
-      if (thinking) {
-          thinking.classList.remove('thinking');
-          const formatted = renderMarkdown(escapeHtml(text));
-          thinking.innerHTML = `<div>${formatted}</div><div class="message-timestamp">${new Date().toLocaleTimeString()}</div>`;
-          return;
-      }
-      appendMessage('assistant', text);
+    const thinking = document.querySelector('.message-assistant.thinking');
+    if (thinking) {
+      thinking.classList.remove('thinking');
+      const formatted = renderMarkdown(escapeHtml(text));
+      thinking.innerHTML = `<div>${formatted}</div><div class="message-timestamp">${new Date().toLocaleTimeString()}</div>`;
+      return;
+    }
+    appendMessage('assistant', text);
   }
 
   function updateLastUserMessage(text) {
@@ -435,16 +435,7 @@ async function loadSessions() {
         document.getElementById('chat-messages').innerHTML = '';
         data.history.forEach(item => appendMessage(item.role, item.text));
       }
-    }).catch(() => {});
-  }
-
-  function reconnectSSE() {
-    if (currentEventSource) currentEventSource.close();
-    currentEventSource = new EventSource('/api/nexus/proactive-stream?session_id=' + currentSessionId);
-    currentEventSource.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      appendMessage('assistant', '💬 ' + msg.message);
-    };
+    }).catch(() => { });
   }
 
   sendButton.addEventListener('click', sendMessage);
@@ -452,12 +443,6 @@ async function loadSessions() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
   resetButton.addEventListener('click', resetSession);
-
-  const heartbeat = setInterval(() => fetch('/api/heartbeat', { method: 'POST' }).catch(() => {}), 30000);
-  window.addEventListener('beforeunload', () => {
-    clearInterval(heartbeat);
-    navigator.sendBeacon('/api/heartbeat', JSON.stringify({ closing: true }));
-  });
 
   // Inicialización
   loadSessions().then(() => {
