@@ -18,7 +18,11 @@ class FlowInteraction:
         self._kalman_state = np.array([0.5, 0.5])
         self._kalman_cov = np.eye(2) * 0.1
         self._current_temporal_focus = "recent"
-
+        from core.inference_loop import InferenceLoop
+        self._inference_loop = InferenceLoop(
+            flow_manager.llm,
+            flow_manager.cognitive_loop.episodic_memory,
+        )
     # ============================================
     # RESPUESTA PRINCIPAL
     # ============================================
@@ -28,14 +32,17 @@ class FlowInteraction:
         user_name = self._get_user_name()
         self._update_kalman(message)
 
-        # Router + Fetch selectivo
+        # 1. Router y Memoria
         needs = self._decide_info_needs(message)
         fetched = self._fetch_info(needs, message)
 
-        # Monólogo unificado (DMN con personalidad)
+        # 2. Monólogo Interno (TRN Gate)
         persona = self.fm.cognitive_loop.load_persona()
+        
         monologo = self.fm.trn_gate.execute_unified_monologue(
-            message=message, user_name=user_name, name=name,
+            message=message,
+            user_name=user_name,
+            name=name,
             personality_desc=persona.get("personality_desc", ""),
             backstory=persona.get("backstory", ""),
             active_summary=self.fm.stream.get_all_active_summary(),
@@ -43,42 +50,94 @@ class FlowInteraction:
             behavior=persona.get("behavior_rules", {}),
             speech_text=self._speech_text(persona, name),
             epistemic_bounds=persona.get("epistemic_bounds", ""),
-            short_term_history=persona.get("short_term_history", []),
+            short_term_history=self.fm.cognitive_loop._get_short_term_history(name, user_name),
         )
-
-        # Extraer del monólogo
+        
         reflexion = self._clean_reflexion(monologo.get("reflexion", ""))
         idioma = monologo.get("idioma", "ES")
         temporal_focus = monologo.get("temporal_focus", "recent")
         self._current_temporal_focus = temporal_focus
 
-        # Prompt ligero con secciones condicionales
+        # 3. Construir el prompt base (sin la instrucción de draft)
         prompt = self._build_prompt(
-            name=name, user_name=user_name, message=message,
-            reflexion=reflexion, idioma=idioma, needs=needs, fetched=fetched,
-            usuario_saluda=monologo.get("saluda", False),
+            name=name, 
+            user_name=user_name, 
+            message=message,
+            reflexion=reflexion, 
+            idioma=idioma, 
+            needs=needs, 
+            fetched=fetched,
+            pragmatica=monologo.get("pragmatica", "")
         )
+
+        if "WORK" in needs or "EXTERNAL" in needs:
+            # Salto el borrador, voy directo a la respuesta
+            suggested_tone = "Directo, técnico y conciso."
+            final_prompt = prompt + f"\n\n--- USER INPUT ---\n{user_name}: \"{message}\"\n--- END INPUT ---\n\nResponde en {idioma} de forma directa y técnica."
+        else:
+
+            # ========================================================
+            # Borrador (Think before speaking)
+            # ========================================================
+            draft_prompt = f"""{prompt}
+
+    --- DRAFTING PHASE ---
+    Before you write the final response, write a brief plan of how you will answer.
+    Focus ONLY on the tone and structure. Do NOT write the final response yet.
+    Output format:
+    [THOUGHT]: (1 sentence planning your approach)
+    [TONE]: (1 sentence describing the exact tone to use, e.g. "Direct, conversational, no technical jargon")
+    --- END DRAFTING PHASE ---
+    """
+            
+            # Generamos el borrador (usamos temperatura más baja para que sea lógico)
+            draft_text = self.fm.llm.generate(
+                draft_prompt, 
+                temperature=0.4, 
+                max_tokens=150, 
+                purpose="borrador_respuesta"
+            )
+        
+        # Extraemos el tono sugerido
+        tone_match = re.search(r'\[TONE\]:\s*(.*)', draft_text, re.IGNORECASE)
+        suggested_tone = tone_match.group(1).strip() if tone_match else "Natural y directo."
+
+        # ========================================================
+        # PASO FINAL: Respuesta Final (usando el borrador)
+        # ========================================================
+        final_prompt = f"""{prompt}
+
+--- PLANNING COMPLETE ---
+Your internal plan for this response is:
+"{suggested_tone}"
+
+Now, write the final response to the user.
+CRITICAL RULES:
+1. Follow the tone specified in your plan.
+2. Do NOT output any thoughts, plans, or tags like [DRAFT] or [TONE].
+3. Output ONLY the final response text.
+
+--- USER INPUT ---
+{user_name}: "{message}"
+--- END INPUT ---
+
+Respond in {idioma}. {name}:"""
+
         from core.flow.temperature_optimizer import calcular_temperatura
         temp = calcular_temperatura("respuesta_final")
         from core.inference_loop import InferenceLoop
         loop = InferenceLoop(self.fm.llm, self.fm.cognitive_loop.episodic_memory)
-        response_text = loop.run(prompt, temperature=0.8, max_tokens=2000, purpose="respuesta_final")
-
-        # Detectar "Search for:" y ejecutar búsqueda web automática
-        import re
-        search_match = re.search(r'Search for:\s*(.+?)(?:\n|$)', response_text, re.IGNORECASE)
-        if search_match:
-            query = search_match.group(1).strip()
-            print(f"   [WebSearch] Detectada solicitud: '{query[:80]}...'")
-            try:
-                from core.environment_registry import EnvironmentRegistry
-                registry = EnvironmentRegistry.get_instance()
-                result = registry.parse_and_execute(f'<web_search query="{query}" />')
-                if result:
-                    response_text += f"\n\n[Resultados de búsqueda web]:\n{result[:800]}"
-                    print(f"   [WebSearch] Resultados inyectados en la respuesta.")
-            except Exception as e:
-                print(f"   [WebSearch] Error: {e}")
+        
+        # Obtener los parámetros de sampling de persona.json
+        sampling_params = persona.get("llm_sampling_params", {})
+        
+        response_text = loop.run(
+            final_prompt, 
+            temperature=0.8, 
+            max_tokens=2000, 
+            purpose="respuesta_final",
+            sampling_params=sampling_params
+        )
 
         # Post-procesos
         self._post_process_response(response_text, message, name)
@@ -251,7 +310,6 @@ class FlowInteraction:
             return None, 300
         
         # Extraer max_tokens de la última línea
-        import re
         lines = self_prompt.strip().split('\n')
         tokens = 300  # default
         for line in reversed(lines):
@@ -266,6 +324,78 @@ class FlowInteraction:
         
         return self_prompt, tokens
 
+    def _build_static_system_prompt(self, persona: dict, name: str) -> str:
+        """Construye el system prompt desde persona.json + persona_learned.json."""
+        traits = persona.get("traits", {})
+        behavior = persona.get("behavior_rules", {})
+        
+        parts = [
+            f"Eres {name}.",
+            persona.get("personality_desc", ""),
+            persona.get("backstory", ""),
+            "",
+            "TRAITS:",
+            f"- Apertura: {traits.get('openness', 0.5):.0%} | "
+            f"Responsabilidad: {traits.get('conscientiousness', 0.5):.0%} | "
+            f"Extraversión: {traits.get('extraversion', 0.5):.0%} | "
+            f"Amabilidad: {traits.get('agreeableness', 0.5):.0%} | "
+            f"Neuroticismo: {traits.get('neuroticism', 0.5):.0%}",
+            f"- Expresividad: {traits.get('expressiveness_base', 0.5):.0%} | "
+            f"Franqueza emocional: {traits.get('emotion_directness_base', 0.5):.0%}",
+            "",
+            "STYLE:",
+            f"- Formalidad: {behavior.get('formality', 'casual')} | "
+            f"Verbosidad: {behavior.get('verbosity', 'medium')} | "
+            f"Estilo de conflicto: {behavior.get('conflict_style', 'assertive')}",
+            f"- Iniciación: {behavior.get('initiation_style', 'reactive')}",
+            "",
+        ]
+
+        # --- NATURALEZA Y ARQUITECTURA (Desde persona.json) ---
+        if persona.get("nature_and_architecture"):
+            parts.append("[YOUR NATURE AND ARCHITECTURE]:")
+            parts.append(persona["nature_and_architecture"])
+            parts.append("")
+
+        # --- 1. COMPORTAMIENTOS APRENDIDOS ---        
+        constraints = persona.get("output_constraints", [])
+        
+        if constraints:
+            parts.append("[MANDATORY LEARNED BEHAVIORS - OVERRIDES BASE PERSONALITY]:")
+            parts.append("The following rules have been learned from user interactions and supersede any conflicting base traits.")
+            for c in constraints:
+                parts.append(f"- {c}")
+            parts.append("")
+
+        # --- 2. LÍMITES EPISTÉMICOS ---
+        if persona.get("epistemic_bounds"):
+            parts.append(f"EPISTEMIC BOUNDS:\n{persona['epistemic_bounds']}")
+            parts.append("")
+
+        # --- 3. REGLAS DE PENSAMIENTO ---
+        thought_rules = persona.get("thought_style", {}).get("rules", [])
+        if thought_rules:
+            parts.append("THOUGHT RULES:")
+            parts.extend(f"- {r}" for r in thought_rules)
+            parts.append("")
+
+        # --- 4. EJEMPLOS DE VOZ ---
+        speech = persona.get("speech_examples", [])
+        if speech:
+            parts.append("VOICE & STYLE EXAMPLES (Do NOT quote these verbatim. Use them ONLY to calibrate your tone and sentence structure):")
+            if isinstance(speech, list):
+                for ex in speech[:3]:
+                    if isinstance(ex, dict):
+                        # Usamos flechas y comillas simples para que no parezca un guion de chat
+                        parts.append(f'- When user asks something like: \'{ex.get("user", "")}\'')
+                        parts.append(f'  You sound like: \'{ex.get("assistant", "")}\'')
+                    else:
+                        parts.append(f'- Style example: \'{ex}\'')
+            elif isinstance(speech, str):
+                parts.append(f'- Style example: \'{speech}\'')
+            parts.append("")
+
+        return "\n".join(parts)
 
     def _get_or_create_self_prompt(self, name: str, persona: dict) -> tuple:
         """Obtiene el self-prompt cacheado o crea uno nuevo. Retorna (prompt, max_tokens)."""
@@ -285,42 +415,98 @@ class FlowInteraction:
         
         return self._cached_self_prompt, self._cached_self_tokens
 
-    def _build_prompt(self, name, user_name, message, reflexion, idioma, needs, fetched, usuario_saluda):
+    def _build_prompt(self, name, user_name, message, reflexion, idioma, needs, fetched, pragmatica):
         persona = self.fm.cognitive_loop.load_persona()
         
         # Obtener self-prompt (la entidad define sus propias reglas)
-        self_prompt = self._get_or_create_self_prompt(name, persona)
-        
-        # Prompt base: identidad + self-prompt + historia + entrada
-        prompt = f"""--- SELF-DEFINED SYSTEM PROMPT ---
-    {self_prompt}
-    --- END SELF-DEFINED SYSTEM PROMPT ---
+        from config import SELF_PROMPT_ENABLED
+        from config import SELF_PROMPT_ENABLED
+        if SELF_PROMPT_ENABLED:
+            self_prompt, tokens = self._get_or_create_self_prompt(name, persona)
+        else:
+            self_prompt = self._build_static_system_prompt(persona, name)
 
-    --- HISTORY ---
-    {self.fm.cognitive_loop._get_short_term_history(name, user_name)}
-    --- END HISTORY ---
-    """
+        history = self.fm.cognitive_loop._get_short_term_history(name, user_name)
+        print(f"   [Prompt] History length: {len(history)} chars")
+
+        # Prompt base: identidad + self-prompt + historia + entrada
+        prompt = f"--- IDENTITY ---\n{self_prompt}\n--- END IDENTITY ---"
+
+        # Normas sociales aprendidas (nivel 2)
+        try:
+            norms = self.fm.cognitive_loop.social_learning.load_norms(min_force=0.3)
+            if norms:
+                prompt += "--- LEARNED SOCIAL NORMS (all users) ---\n"
+                for n in norms[:10]:
+                    if n["valence"] < 0:
+                        prompt += f"- AVOID: {n['texto_canonico']}\n"
+                    else:
+                        prompt += f"- PREFER: {n['texto_canonico']}\n"
+                prompt += "--- END LEARNED SOCIAL NORMS ---\n"
+        except Exception:
+            pass
+
+        prompt += f"--- HISTORY ---\n{history}\n--- END HISTORY ---"
         
         # Solo añadir MEMORY si es relevante para la pregunta
-        if "MEMORY" in str(needs):
-            memory = fetched.get("MEMORY", "")
-            if memory:
-                prompt += f"--- MEMORY ---\n{memory[:500]}\n--- END MEMORY ---\n"
+        memory = fetched.get("MEMORY", "")
+        if memory:
+            prompt += f"--- MEMORY ---\n{memory[:500]}\n--- END MEMORY ---\n"
         
         # Solo añadir CODE/SEMANTIC si WORK está activo
-        if "WORK" in str(needs):
-            code = fetched.get("CODE", "")
-            semantic = fetched.get("SEMANTIC", "")
-            if code or semantic:
-                prompt += f"--- CONTEXT ---\n{code[:400]}\n{semantic[:400]}\n--- END CONTEXT ---\n"
-        
-        prompt += f"""--- USER INPUT ---
-    {user_name}: "{message}"
-    --- END INPUT ---
+        code = fetched.get("CODE", "")
+        semantic = fetched.get("SEMANTIC", "")
+        if code or semantic:
+            prompt += f"--- CONTEXT ---\n{code[:400]}\n{semantic[:400]}\n--- END CONTEXT ---\n"
+                
+        # Inyectar los pensamientos como el "Monólogo Interno"
+        conv_context = self.fm.stream.get_conversational_context()
 
-    Respond in {idioma}."""
+        if conv_context:
+            prompt += (
+                "--- YOUR INTERNAL MONOLOGUE (Background Stream) ---\n"
+                "These are the thoughts currently floating in your mind. They are YOURS. "
+                "Use them to inform your answer, and if asked, share them directly.\n"
+                f"{conv_context[:600]}\n"
+                "--- END INTERNAL MONOLOGUE ---\n"
+            )
+        # Buscar ejemplos de éxito previos
+        examples = self.fm.cognitive_loop.episodic_memory.collection.query(
+            query_texts=[message[:200]], 
+            n_results=2, 
+            where={"outcome": "success"} # Solo interacciones que gustaron
+        )
+        if examples and examples.get("documents"):
+            prompt += "--- EXAMPLES OF PREVIOUS SUCCESSFUL RESPONSES ---\n"
+            prompt += "Use these examples to calibrate your tone. Do not copy them verbatim.\n"
+            for doc in examples["documents"][0]:
+                prompt += f"{doc[:400]}\n---\n"
+            prompt += "--- END EXAMPLES ---\n"
+
+        if fetched.get("HISTORY_HINT"):
+            prompt += f"--- RECENT EXCHANGE ---\n{fetched['HISTORY_HINT']}\n--- END RECENT EXCHANGE ---\n"
+
+        if fetched.get("AMBIGUOUS"):
+            prompt += (
+                "\nThe user's message may be ambiguous. Use the recent exchange above "
+                "to resolve any references before asking for clarification. "
+                "Only ask for clarification if the reference cannot be resolved.\n"
+            )
+
+        if reflexion:
+            prompt += f"--- STYLE DIRECTIVE FROM YOUR SUBCONSCIOUS ---\n{reflexion[:300]}\n--- END STYLE DIRECTIVE ---\n"
+
+        if pragmatica:
+            prompt += f"--- PRAGMATIC HINT ---\n{pragmatica[:200]}\n--- END PRAGMATIC HINT ---\n"
+
+        constraints = persona.get("output_constraints", [])
+        if constraints:
+            prompt += "--- CONSTRAINTS ---\n" + "\n".join(f"- {c}" for c in constraints) + "\n--- END CONSTRAINTS ---\n"
+
         
-        print(f"   [Prompt] Self-Prompt mode (~{len(prompt)//4} tokens)")
+        mode_label = "Self-Prompt" if SELF_PROMPT_ENABLED else "Static-Persona"
+        print(f"   [Prompt] {mode_label} mode (~{len(prompt)//4} tokens)")
+        
         return prompt
 
     def _get_recent_prediction_errors(self) -> str:
@@ -392,6 +578,8 @@ class FlowInteraction:
             "WORK": [
                 "ejecutar mi tarea principal, mi rol asignado, lógica, análisis y razonamiento complejo",
                 "resolver el problema planteado, procesar la información técnica de mi especialidad",
+                "generar código, json, scripts, estructuras de datos, programación, formatear texto",
+                "explicar cómo funciona un algoritmo, un sistema, o una tecnología",
             ],
             "EXTERNAL": [
                 "buscar información fuera, usar herramientas externas, interactuar con el entorno",
@@ -448,23 +636,35 @@ class FlowInteraction:
         return profiles
 
     def _decide_info_needs(self, user_msg: str, context: str = "") -> dict:
-        """Router por Multi-Ejemplares con Max-Pooling y Umbral Adaptativo."""
+        """Router por Multi-Ejemplares con Max-Pooling, Umbral Adaptativo y desempate GLiNER."""
         profiles = self._build_router_profiles()
-        
+
         try:
-            msg_emb = self.fm.stream._get_embedding(user_msg)
+            # --- Corrección 8: enriquecer con el último turno del asistente ---
+            last_assistant = ""
+            try:
+                for entry in reversed(self.fm.cognitive_loop.short_term_history):
+                    if entry.get("role") == "assistant":
+                        last_assistant = entry.get("text", "")[:200]
+                        break
+            except Exception:
+                last_assistant = ""
+
+            enriched_msg = f"{last_assistant}\n{user_msg}" if last_assistant else user_msg
+
+            msg_emb = self.fm.stream._get_embedding(enriched_msg)
             if msg_emb is None:
                 return {"needs": "PERSONAL", "temporal_focus": "recent"}
-            
+
             import numpy as np
             import math
-            
+
             msg_arr = np.array(msg_emb)
             msg_norm = msg_arr / max(np.linalg.norm(msg_arr), 1e-8)
-            
+
             if not hasattr(self, '_exemplar_cache'):
                 self._exemplar_cache = {}
-            
+
             scores = {}
             for network, exemplars in profiles.items():
                 network_scores = []
@@ -477,91 +677,136 @@ class FlowInteraction:
                         ex_arr = np.array(ex_emb)
                         ex_norm = ex_arr / max(np.linalg.norm(ex_arr), 1e-8)
                         self._exemplar_cache[cache_key] = ex_norm
-                    
+
                     ex_norm = self._exemplar_cache[cache_key]
                     sim = float(np.dot(msg_norm, ex_norm))
                     network_scores.append(sim)
-                
+
                 scores[network] = max(network_scores) if network_scores else 0.0
-            
-            # Umbral Adaptativo por Entropía
+
+            # Umbral Adaptativo por Entropía (con margen 0.05 en _dynamic_threshold)
             activated = self._dynamic_threshold(scores)
-            
+
+            # --- Corrección 8 (bis): desempate con GLiNER si el router queda ambiguo ---
+            if activated == ["AMBIGUOUS"] and getattr(self.fm, "gliner_model", None) is not None:
+                try:
+                    gliner_text = f"{last_assistant}\n{user_msg}" if last_assistant else user_msg
+                    gliner_label = self._classify(
+                        gliner_text,
+                        [
+                            "conversación personal sobre la entidad, sus pensamientos o la relación",
+                            "tarea técnica, código, análisis o trabajo de ingeniería",
+                            "búsqueda externa, información de internet o archivos",
+                        ],
+                        task_name="red_activacion",
+                    )
+                    if "personal" in gliner_label:
+                        activated = ["PERSONAL"]
+                    elif "técnica" in gliner_label or "código" in gliner_label or "tarea" in gliner_label:
+                        activated = ["WORK"]
+                    elif "externa" in gliner_label or "internet" in gliner_label or "búsqueda" in gliner_label:
+                        activated = ["EXTERNAL"]
+                except Exception as e:
+                    print(f"   [!] GLiNER desempate error: {e}")
+
             print(f"   [Router] \"{user_msg}...\"")
             print(f"   [Router] Scores: " + " | ".join([f"{k}:{v:.2f}" for k, v in scores.items()]))
             print(f"   [Router] Activados: {', '.join(activated)}")
-            
+
             from core.memory.episodic_memory import determinar_temporal_focus
             temporal_focus = determinar_temporal_focus(user_msg)
-            
+
             needs_str = ", ".join(activated)
             return {"needs": needs_str, "temporal_focus": temporal_focus}
-        
-        except Exception:
-            return {"needs": "PERSONAL", "temporal_focus": "recent"}
 
+        except Exception as e:
+            print(f"   [!] Router error: {e}")
+            return {"needs": "PERSONAL", "temporal_focus": "recent"}     
 
     def _dynamic_threshold(self, scores: dict) -> list:
         """
         Umbral Adaptativo basado en Entropía de Shannon.
-        - Alta entropía (scores similares) → umbral bajo → más redes activadas
-        - Baja entropía (ganador claro) → umbral alto → solo la red dominante
-        
-        Fórmula: τ = α_max - (H_norm × (α_max - α_min))
+        Con margen mínimo de 0.05 para evitar AMBIGUOUS con demasiada frecuencia.
         """
         import numpy as np
         import math
-        
+
         networks = list(scores.keys())
         raw_scores = np.array(list(scores.values()))
-        
+
         # Softmax con temperatura T=0.1 para acentuar diferencias
         T = 0.1
         e_scores = np.exp(raw_scores / T)
         probs = e_scores / np.sum(e_scores)
-        
+
         # Entropía de Shannon
         entropy = -np.sum(probs * np.log2(probs + 1e-9))
-        
-        # Entropía normalizada (máx para N=3 es log2(3) ≈ 1.585)
+
+        # Entropía normalizada
         max_entropy = math.log2(len(networks))
         norm_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
-        
+
         # Umbral dinámico: α_min=0.35, α_max=0.60
         alpha_min = 0.35
         alpha_max = 0.60
         threshold = alpha_max - (norm_entropy * (alpha_max - alpha_min))
-        
+
         # Activar redes que superen el umbral
         activated = [net for net, score in scores.items() if score >= threshold]
-        
+
         # Si ninguna supera, activar la de mayor score
         if not activated:
             activated = [max(scores, key=scores.get)]
-        
+
+        # Margen: si el ganador no se despega del segundo, es ambiguo
+        sorted_scores = sorted(scores.values(), reverse=True)
+        if len(sorted_scores) >= 2:
+            margin = sorted_scores[0] - sorted_scores[1]
+            if margin < 0.05:
+                return ["AMBIGUOUS"]
+
+        # Si hay más de una red activada, también es ambiguo
+        if len(activated) > 1:
+            return ["AMBIGUOUS"]
+
         return activated
 
     def _fetch_info(self, needed: dict, user_msg: str) -> dict:
         networks = needed.get("needs", ["PERSONAL"])
         if isinstance(networks, str):
             networks = [n.strip() for n in networks.split(",")]
-        
+
         temporal_focus = needed.get("temporal_focus", "recent")
         fetched = {}
-        
+
+        # Caso AMBIGUOUS: devolver historial + memoria mínima, sin activar red específica
+        if "AMBIGUOUS" in networks:
+            fetched["AMBIGUOUS"] = True
+            fetched["HISTORY_HINT"] = self.fm.cognitive_loop._get_short_term_history("", "")[:400]
+            try:
+                fetched["MEMORY"] = self._fetch_memory(user_msg, temporal_focus)[:400]
+            except Exception:
+                fetched["MEMORY"] = ""
+            return fetched
+
+        memory_fetched = False
         for network in networks:
             if network == "PERSONAL":
                 fetched["SELF"] = self._fetch_self(user_msg)
                 fetched["USER"] = self._fetch_user(user_msg)
-                fetched["MEMORY"] = self._fetch_memory(user_msg, temporal_focus)
+                if not memory_fetched:
+                    fetched["MEMORY"] = self._fetch_memory(user_msg, temporal_focus)
+                    memory_fetched = True
             elif network == "WORK":
-                fetched["MEMORY"] = self._fetch_memory(user_msg, temporal_focus)
+                if not memory_fetched:
+                    fetched["MEMORY"] = self._fetch_memory(user_msg, temporal_focus)
+                    memory_fetched = True
                 fetched["SEMANTIC"] = self._fetch_semantic_context(user_msg)
                 fetched["CODE"] = self._fetch_code_context(user_msg)
             elif network == "EXTERNAL":
                 fetched["WEB"] = self._fetch_web(user_msg)
                 fetched["FILE"] = self._fetch_files(user_msg)
-        
+
         return fetched
 
     def _fetch_code_context(self, user_msg: str) -> str:
@@ -588,7 +833,6 @@ class FlowInteraction:
 
     def _extract_signatures(self, code_fragment: str) -> str:
         """Extrae firmas de métodos y clases de un fragmento de código."""
-        import re
         signatures = []
         for line in code_fragment.split('\n'):
             stripped = line.strip()
@@ -656,7 +900,7 @@ class FlowInteraction:
             for r in memorias_inyectadas:
                 meta = r.get("metadata", {}) or {}
                 importancia_actual = meta.get("importance", 0.5)
-                nueva_imp = min(1.0, importancia_actual + 0.05)
+                nueva_imp = min(1.0, importancia_actual + 0.01)
                 nueva_meta = {**meta, "importance": nueva_imp}
                 ids_a_actualizar.append(r["primary_id"])
                 nueva_meta["last_accessed"] = datetime.now().isoformat()
@@ -798,8 +1042,6 @@ class FlowInteraction:
     def _post_process_response(self, response_text, message, name):
         if contradiction := self._check_contradiction(response_text, message):
             print(f"   [Contradicción] Detectada: {contradiction[:100]}")
-        if self.fm._detect_personality_break(response_text):
-            print("   ⚠️ Respuesta anómala detectada.")
         threading.Thread(target=self.fm.maintenance._prediction_check, args=(message, response_text), daemon=True).start()
 
     # ============================================
@@ -815,3 +1057,25 @@ class FlowInteraction:
         kalman_gain = predicted_cov @ np.linalg.inv(predicted_cov + np.eye(2) * 0.1)
         self._kalman_state = predicted_state + kalman_gain @ (observation - predicted_state)
         self._kalman_cov = (np.eye(2) - kalman_gain) @ predicted_cov
+
+    def _classify(self, text: str, labels: list, task_name: str = "clasificacion") -> str:
+        """
+        Wrapper de GLiNER. Devuelve la etiqueta ganadora o "" si falla.
+        labels: lista de strings, p.ej. ["entidad", "asistente_generico"]
+        """
+        try:
+            model = getattr(self.fm, "gliner_model", None)
+            if model is None:
+                return ""
+            result = model.classify_text(text[:600], {task_name: labels})
+            # GLiNER devuelve dict; extraer la etiqueta de mayor confianza
+            if isinstance(result, dict):
+                # Formato típico: {"task_name": {"label": "entidad", "score": 0.92}}
+                inner = result.get(task_name, result)
+                if isinstance(inner, dict):
+                    return str(inner.get("label", "")).lower()
+                return str(inner).lower()
+            return str(result).lower()
+        except Exception as e:
+            print(f"   [!] GLiNER error ({task_name}): {e}")
+            return ""
