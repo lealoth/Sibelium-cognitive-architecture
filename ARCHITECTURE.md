@@ -1,68 +1,30 @@
+# Arquitectura Cognitiva
 
-# Architecture: The Sibelium Cognitive System
+## 1. Capas del Sistema
+Sibelium se divide en tres capas estrictas para evitar la contaminación de contexto.
 
-## Core Principle
+### Capa 1: Memoria (Persistencia)
+- **EpisodicMemory (ChromaDB):** Almacena interacciones pasadas. Se usa para recuperación semántica a largo plazo.
+- **UserMemory:** Perfil del usuario (nombre, preferencias).
+- **SelfMemory:** Estado interno básico (emociones, confianza).
+- *Nota:* Actualmente, el flujo principal de conversación no inyecta la memoria episódica en el prompt para no saturar al 8B. Se usará cuando implementemos herramientas de agencia.
 
-Sibelium is built on a simple but powerful idea: consciousness is not a singular process but a continuous stream of competing, decaying, and reinforcing thoughts. By modeling this computationally, emergent behaviors appear — preferences, introspection, emotional regulation, and metacognition.
+### Capa 2: El Intérprete (Toma de Decisiones)
+- **Ubicación:** `flow_interaction.py` -> `_generate_response()`.
+- **Función:** Es el "Prefrontal Cortex". Recibe el input y decide el plan.
+- **Por qué existe:** Un 8B falla si le pides que piense y hable al mismo tiempo. Al separar la decisión de la ejecución, el modelo se enfoca en una tarea a la vez.
+- **Salida:** Un JSON con `{"accion": "...", "tono": "...", "directriz": "..."}`.
 
----
+### Capa 3: El Ejecutor (Generación de Lenguaje)
+- **Ubicación:** `flow_interaction.py` -> `_generate_response()`.
+- **Función:** Es el "Área de Broca". Genera el texto final.
+- **Por qué es limpio:** No tiene instrucciones contradictorias. Solo lee la directiva del Intérprete y el `persona.json` base.
 
-## Dual-Cycle Architecture
+## 2. El `persona.json`
+Es el "Mito Fundacional". Es estático e inmutable. Define:
+- `personality_desc`: La descripción base.
+- `output_constraints`: Reglas de comportamiento (ej. "No uses 'Como IA'").
+- `llm_sampling_params`: Temperaturas y penalizaciones por tarea.
 
-The system operates on two temporal cycles:
-
-### Fast Cycle (every 3 seconds)
-- Decay all active thoughts (latent inhibition)
-- React to state changes (emotion, confidence)
-- Generate associative connections between thoughts
-- Evaluate pattern detectors (every 60 seconds)
-- React to long silences
-
-### Slow Cycle (every 15 seconds)
-- Deep reflection using LLM
-- Spontaneous curiosity generation
-- Mental simulations (hypothetical scenarios)
-- File exploration from `nexus_world/`
-- Web searches triggered by curiosity
-- Emotional regulation (every 10 minutes)
-- Memory consolidation (every 60 minutes of idle time)
-
----
-
-## The FlowStream
-
-The `FlowStream` is the river of consciousness. It contains:
-
-- **ThoughtItems**: Individual thoughts with ID, priority (0.0-1.0), decay rate, and metadata
-- **Active thoughts**: Those with priority > 0.08, sorted by priority (max 15)
-- **Current topic**: The highest priority thought
-
-Each thought undergoes:
-1. **Decay**: Priority decreases over time
-2. **Reinforcement**: Relevance boosts priority
-3. **Inhibition**: Similar recent thoughts are suppressed
-
----
-
-## Memory Systems
-
-### Episodic Memory (ChromaDB)
-- Stores all user-entity interactions
-- Semantic search for relevant past conversations
-- Used to provide autobiographical continuity
-
-### Self Memory (JSON)
-- Emotional state (emotion, intensity, energy, disposition)
-- User relationship (confidence, interest)
-- Evolution log (emotional changes over time)
-- Personal objectives
-
-### User Memory (JSON)
-- Personal data (name, age, location, occupation)
-- Behavioral perceptions (style, attitude, general impression)
-- Relationship metadata
-
-### Scaffolding System
-- Tracks exploration patterns
-- Determines when the entity needs more or less critical thinking support
-- Measures autonomy ratio
+## 3. ¿Qué pasó con el Aprendizaje (persona_learned)?
+Se desactivó temporalmente. En la siguiente fase (Agencia), rediseñaremos un aprendizaje relacional que escriba directamente en `persona_learned.json` y module las directivas del Intérprete.

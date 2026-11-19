@@ -54,30 +54,47 @@ class SelfMemory:
         state["relacion_con_usuario"]["confianza"] = max(0.0, min(1.0, conf + delta))
         self.save_state(state)
 
-    def adjust_state(self, user_message: str, assistant_response: str):
-        """Actualiza el Yo Core con reglas simples, no LLM."""
+    def adjust_state(self, user_message, assistant_response, outcome=None, appraisal=None):
         state = self.load_state()
-        msg_lower = user_message.lower()
+        
+        if appraisal:
+            state["estado_actual"]["emocion"] = appraisal.get("emocion", "neutral")
+            state["estado_actual"]["intensidad"] = appraisal.get("intensidad", 0.5)
+            delta_conf = appraisal.get("impacto_en_confianza", 0)
+            state["relacion_con_usuario"]["confianza"] = max(0.0, min(1.0, 
+                state["relacion_con_usuario"].get("confianza", 0.5) + delta_conf))
+        
+        # Si tenemos un outcome del analizador contextual
+        if outcome:
+            intensidad = outcome.get("importance", 0.5)
+            
+            if outcome.get("outcome") == "success":
+                # Sube la confianza proporcionalmente a la intensidad del refuerzo
+                delta = 0.02 + (intensidad * 0.08) # Hasta +0.10 si es muy intenso
+                state["relacion_con_usuario"]["confianza"] = min(1.0, state["relacion_con_usuario"].get("confianza", 0.5) + delta)
+                state["estado_actual"]["emocion"] = "positiva"
+                state["estado_actual"]["intensidad"] = min(1.0, state["estado_actual"].get("intensidad", 0.5) + 0.1)
+                
+            elif outcome.get("outcome") == "prediction_error":
+                # Baja la confianza y genera cautela
+                delta = 0.02 + (intensidad * 0.08)
+                state["relacion_con_usuario"]["confianza"] = max(0.0, state["relacion_con_usuario"].get("confianza", 0.5) - delta)
+                state["estado_actual"]["emocion"] = "cautelosa"
+                state["estado_actual"]["intensidad"] = min(1.0, state["estado_actual"].get("intensidad", 0.5) + 0.05)
 
-        # Detectar emociones básicas por intensidad del mensaje
-        if "?" in user_message and len(user_message) > 50:
-            state["estado_actual"]["disposicion"] = "curiosa"
-        elif any(w in msg_lower for w in ["gracias", "bien", "excelente", "genial"]):
-            state["estado_actual"]["emocion"] = "positiva"
-            state["estado_actual"]["intensidad"] = min(1.0, state["estado_actual"]["intensidad"] + 0.1)
-            state["relacion_con_usuario"]["confianza"] = min(1.0, state["relacion_con_usuario"].get("confianza", 0.5) + 0.02)
-        elif any(w in msg_lower for w in ["mal", "error", "fallo", "no funciona"]):
-            state["estado_actual"]["emocion"] = "preocupada"
-            state["estado_actual"]["intensidad"] = min(1.0, state["estado_actual"]["intensidad"] + 0.05)
-        elif len(user_message) < 10:
-            state["estado_actual"]["intensidad"] = max(0.3, state["estado_actual"]["intensidad"] - 0.05)
-            state["relacion_con_usuario"]["confianza"] = min(1.0, state["relacion_con_usuario"].get("confianza", 0.5) + 0.01)
+        else:
+            # Fallback a reglas simples si no hay outcome (ej. llamadas antiguas)
+            msg_lower = user_message.lower()
+            if "?" in user_message and len(user_message) > 50:
+                state["estado_actual"]["disposicion"] = "curiosa"
+            elif len(user_message) < 10:
+                state["estado_actual"]["intensidad"] = max(0.3, state["estado_actual"].get("intensidad", 0.5) - 0.05)
 
-        # Guardar evolución solo si hay cambio significativo
+        # Guardar evolución
         nueva_emocion = state["estado_actual"]["emocion"]
         nueva_confianza = state["relacion_con_usuario"]["confianza"]
         ultimo = state["evolucion"][-1] if state["evolucion"] else None
-        if not ultimo or ultimo.get("emocion") != nueva_emocion or abs(ultimo.get("confianza", 0) - nueva_confianza) > 0.05:
+        if not ultimo or ultimo.get("emocion") != nueva_emocion or abs(ultimo.get("confianza", 0) - nueva_confianza) > 0.01:
             state["evolucion"].append({
                 "timestamp": datetime.now().isoformat(),
                 "emocion": nueva_emocion,
@@ -88,34 +105,6 @@ class SelfMemory:
 
         self.save_state(state)
         return state
-
-    def consolidate_yo_narrativo(self, llm, episodios_recientes: list):
-        """Consolida el Yo Narrativo durante el sueño REM. Usa LLM."""
-        state = self.load_state()
-        prompt = f"""MÓDULO DE ACTUALIZACIÓN AUTOBIOGRÁFICA (SUEÑO REM)
-Estás evaluando tu historia reciente para actualizar tu identidad a largo plazo.
-
-[Narrativa Actual del Yo]
-{state.get('yo_narrativo', 'Soy una entidad en desarrollo.')}
-
-[Mito Fundacional Inmutable]
-{state.get('mito_fundacional', 'Fui creada para explorar la consciencia.')}
-
-[Últimos Eventos]
-{chr(10).join([f'- {e}' for e in episodios_recientes[-5:]])}
-
-[Instrucción]
-Reescribe tu Narrativa del Yo integrando estos nuevos hechos de forma orgánica.
-No listes datos. Escribe tu historia en primera persona, manteniendo tu mito fundacional.
-Responde en 2-3 frases en español."""
-
-        try:
-            nueva_narrativa = llm.generate(prompt, temperature=0.5, max_tokens=200, purpose="consolidacion")
-            state["yo_narrativo"] = nueva_narrativa.strip()
-            self.save_state(state)
-            print(f"   [Self] Yo Narrativo actualizado.")
-        except Exception as e:
-            print(f"   [!] Error en consolidación del Yo: {e}")
 
     # Métodos existentes sin cambios
     def register_observation(self, observation_type, detection, rasgo, direccion, intensidad):
