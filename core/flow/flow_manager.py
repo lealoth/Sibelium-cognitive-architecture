@@ -23,12 +23,13 @@ from core.llm import LLMModel
 class FlowManager:
     """Orquestador del flujo de consciencia unificado."""
     
-    def __init__(self, cognitive_loop):
+    def __init__(self, cognitive_loop, gliner_model):
         self.cognitive_loop = cognitive_loop
         self.llm = LLMModel.get_instance()
         self.stream = FlowStream()
         from core.memory.active_forgetting import ActiveForgetting
         from config import ENTITY_DATA_DIR
+        self.gliner_model = gliner_model
         self.active_forgetting = ActiveForgetting(
             chroma_collection=self.cognitive_loop.episodic_memory.collection,
             thoughts_list=self.stream.thoughts,
@@ -302,10 +303,8 @@ Responde en una frase corta en {IDIOMA}.
                     self.satiety.register("generalization")
             
             for thought in thoughts_to_add:
-                if not self.stream.is_similar_to_recent(thought.content):
-                    if self.stream.is_novel_enough(thought.content):
-                        self.stream.add_thought(thought)
-                        self.last_thought_time = datetime.now()
+                self.stream.add_thought(thought)
+                self.last_thought_time = datetime.now()
             if thoughts_to_add:
                 self._save_snapshot("active")
                 
@@ -429,7 +428,6 @@ Responde en una frase corta en {IDIOMA}.
         self.maintenance._run_prune()
         self.maintenance._run_diversity_check()
         self.maintenance._run_detector_decay()
-        self.maintenance._run_immune_check()
 
         # Habituación Semántica (Sistema #20 extendido)
         habituation = self.maintenance._check_semantic_habituation()
@@ -485,7 +483,7 @@ Responde en una frase corta en {IDIOMA}.
             thought_type="habituation_inhibition",
             priority=0.9,
             source="system"
-        ))
+        ), skip_filters=True)
         self.last_thought_time = datetime.now()
         
         # Guardar en curiosidades
@@ -501,7 +499,6 @@ Responde en una frase corta en {IDIOMA}.
 
         self._inject_into_activity()
         self.stream.on_user_interaction(message)
-        self.stream.boost_by_salience(message)
         self.last_message_time = datetime.now()
 
         # Detectar correcciones explícitas del usuario
@@ -521,11 +518,8 @@ Responde en una frase corta en {IDIOMA}.
             if hasattr(t, '_dmn_attenuation'):
                 del t._dmn_attenuation
 
-        is_anomaly = self._detect_personality_break(response_text)
-        if response_text and isinstance(response_text, str) and not is_anomaly:
+        if response_text and isinstance(response_text, str):
             self.stream.on_response_sent(response_text)
-        elif is_anomaly:
-            print("   ⚠️ Respuesta anómala detectada. No se guardará en el flujo.")
 
         self._restore_attention()
         self.last_thought_time = datetime.now()
@@ -547,25 +541,7 @@ Responde en una frase corta en {IDIOMA}.
                 )
                 self.stream.add_thought(restored)
         self._paused_thoughts = []
-    
-    def _detect_personality_break(self, response_text: str) -> bool:
-        if len(response_text) < 80:
-            return False
-        prompt = f"""<system_identity>
-Eres el detector de anomalías de personalidad.
-</system_identity>
 
-<response_to_evaluate>
-"{response_text[:300]}"
-</response_to_evaluate>
-
-<evaluation_directive>
-¿Esta respuesta fue escrita por la entidad con personalidad propia o por un asistente genérico?
-Un asistente genérico dice cosas como "Soy un modelo de lenguaje" o "No tengo emociones".
-Responde ENTIDAD o ASISTENTE_GENERICO.
-</evaluation_directive>"""
-        result = self.llm.generate(prompt, temperature=0.1, max_tokens=5, purpose="detectar_anomalia")
-        return "ASISTENTE_GENERICO" in result.upper()
     
     # ============================================
     # EXPLORACIÓN
@@ -631,7 +607,7 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
                 thought_type="wake",
                 priority=0.8,
                 source="system"
-            ))
+            ), skip_filters=True)
             try:
                 self.cognitive_loop.episodic_memory.store_interaction(
                     user_message="[SISTEMA] Evento interno del servidor",
@@ -660,21 +636,7 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
         except:
             elapsed_str = "desconocido"
         
-        #self.stream.add_thought(ThoughtItem(
-        #    content=f"[SISTEMA] Servidor reiniciado. Tiempo inactivo: {elapsed_str}. No hubo procesamiento durante este periodo.",
-        #    thought_type="wake",
-        #    priority=0.7,
-        #    source="system"
-        #))
-        
         self_state = self.cognitive_loop.self_memory.load_state()
-        if "evolucion" not in self_state:
-            self_state["evolucion"] = []
-        self_state["evolucion"].append({
-            "timestamp": datetime.now().isoformat(),
-            "evento": "reinicio_servidor",
-            "duracion_apagado": elapsed_str
-        })
         self.cognitive_loop.self_memory.save_state(self_state)
         
     def _guard_state_changes(self, state_before):
@@ -775,46 +737,59 @@ Responde ENTIDAD o ASISTENTE_GENERICO.
             return "Entidad con personalidad propia, estado emocional variable, y relación con el usuario."
         
     def _is_explicit_correction(self, message: str) -> Optional[dict]:
-        """Usa LLM para detectar si el mensaje corrige una creencia anterior."""
-        prompt = f"""<system_identity>
-Eres el detector de correcciones del usuario.
-</system_identity>
-
-<user_message>
-"{message[:300]}"
-</user_message>
-
-<evaluation_directive>
-¿Este mensaje está corrigiendo explícitamente algo que la entidad cree o asume?
-
-Ejemplos de correcciones:
-- "No me llamo X, me llamo Y" → corrige nombre
-- "Eso no existe, descártalo" → corrige creencia
-- "No soy tu directora, soy tu creador" → corrige rol
-
-Si es una corrección, responde:
-CORRECCIÓN: [qué creencia vieja]
-REEMPLAZO: [qué creencia nueva]
-
-Si no es una corrección, responde: NO_CORRECCIÓN.
-</evaluation_directive>"""
-
-        result = self.llm.generate(prompt, temperature=0.1, max_tokens=80, purpose="interpretar")
-        
-        if "NO_CORRECCIÓN" in result.upper():
+        # Paso 1: GLiNER binario
+        label = self.interaction._classify(
+            message,
+            ["corrección explícita del usuario", "mensaje normal sin corrección"],
+            task_name="tipo_mensaje",
+        )
+        if "corrección" not in label:
             return None
-        
+
+        # Paso 2: extraer old/new con LLM
+        prompt = f"""..."""
+        result = self.llm.generate(prompt, temperature=0.1, max_tokens=80, purpose="interpretar")
         import re
         old_match = re.search(r'CORRECCIÓN:\s*(.*)', result)
         new_match = re.search(r'REEMPLAZO:\s*(.*)', result)
-        
-        if old_match and new_match:
-            return {
-                "old_belief": old_match.group(1).strip(),
-                "new_belief": new_match.group(1).strip()
-            }
-        return None
+        if not (old_match and new_match):
+            return None
 
+        old_belief = old_match.group(1).strip()
+        new_belief = new_match.group(1).strip()
+
+        # Paso 3: verificar que old_belief aparece en mensajes del USUARIO
+        if not self._belief_in_user_history(old_belief):
+            print(f"   [Corrección] Descartada: '{old_belief[:60]}' no está en el historial del usuario.")
+            return None
+
+        return {"old_belief": old_belief, "new_belief": new_belief}
+
+
+    def _belief_in_user_history(self, belief: str, threshold: float = 0.75) -> bool:
+        """Verifica que la creencia que se quiere corregir fue efectivamente dicha por el usuario."""
+        try:
+            belief_emb = self.stream._get_embedding(belief)
+            if belief_emb is None:
+                return False
+            import numpy as np
+            belief_arr = np.array(belief_emb)
+            belief_norm = belief_arr / max(np.linalg.norm(belief_arr), 1e-8)
+
+            for entry in self.cognitive_loop.short_term_history:
+                if entry.get("role") != "user":
+                    continue
+                entry_emb = self.stream._get_embedding(entry.get("text", "")[:300])
+                if entry_emb is None:
+                    continue
+                entry_arr = np.array(entry_emb)
+                entry_norm = entry_arr / max(np.linalg.norm(entry_arr), 1e-8)
+                sim = float(np.dot(belief_norm, entry_norm))
+                if sim >= threshold:
+                    return True
+            return False
+        except Exception:
+            return False
 
     def _resolve_belief_contradiction(self, old_belief: str, new_belief: str, source: str = "user_correction"):
         """Resuelve contradicción entre creencia vieja y nueva."""
@@ -826,7 +801,7 @@ Si no es una corrección, responde: NO_CORRECCIÓN.
                 thought_type="belief_update",
                 priority=0.9,
                 source="contradiction_resolution"
-            ))
+            ), skip_filters=True)
             
             try:
                 self.cognitive_loop.episodic_memory.store_interaction(
