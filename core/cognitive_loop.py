@@ -6,6 +6,7 @@ from pathlib import Path
 
 from core.memory.episodic_memory import EpisodicMemory
 from core.memory.self_memory import SelfMemory
+from core.memory.social_learning import SocialLearning
 from core.memory.user_memory import UserMemory
 from core.models.cognitive_state import CognitiveState, Interaction
 from core.perception.time_perception import get_time_context
@@ -13,6 +14,7 @@ from core.perception.user_analysis import analyze_user_message
 from core.llm import LLMModel
 from core.flow.flow_manager import FlowManager
 from config import ENTITY_DATA_DIR, PERSONA_FILE
+from core.gliner_singleton import get_gliner
 
 REFLECTION_INTERVAL = 5
 
@@ -27,6 +29,8 @@ class CognitiveLoop:
         self.history_path = self.user_dir / "history.json"
         self.interaction_count_path = self.user_dir / "interaction_count.json"
         self.conversation_summary = ""
+        from core.memory.social_learning import SocialLearning
+        self.social_learning = SocialLearning()
 
         # Memorias (UserMemory recibe user_id)
         self.episodic_memory = EpisodicMemory()
@@ -42,7 +46,7 @@ class CognitiveLoop:
         self._load_history_from_disk()
 
         # FlowManager
-        self.flow_manager = FlowManager(self)
+        self.flow_manager = FlowManager(self, gliner_model=get_gliner())
         if start_flow:
             self.flow_manager.start()
 
@@ -65,7 +69,7 @@ class CognitiveLoop:
         if not self.short_term_history:
             return "[Conversación recién iniciada.]"
         lines = []
-        for entry in self.short_term_history[-8:]:
+        for entry in self.short_term_history[-6:]:
             role = persona_name if entry["role"] == "assistant" else user_name
             lines.append(f"{role}: {entry['text'][:200]}")
         return "\n".join(lines)
@@ -73,8 +77,8 @@ class CognitiveLoop:
     def _update_short_term_history(self, message: str, response: str):
         self.short_term_history.append({"role": "user", "text": message})
         self.short_term_history.append({"role": "assistant", "text": response})
-        if len(self.short_term_history) > 8:
-            self.short_term_history = self.short_term_history[-8:]
+        if len(self.short_term_history) > 6:
+            self.short_term_history = self.short_term_history[-6:]
 
     def _load_history_from_disk(self):
         try:
@@ -130,9 +134,39 @@ class CognitiveLoop:
     # ============================================
 
     def load_persona(self) -> dict:
+        """Carga persona base y mergea persona_learned.json encima."""
+        base = {}
         if PERSONA_FILE.exists() and PERSONA_FILE.read_text(encoding="utf-8").strip():
-            return json.loads(PERSONA_FILE.read_text(encoding="utf-8"))
-        return self._default_persona()
+            base = json.loads(PERSONA_FILE.read_text(encoding="utf-8"))
+        else:
+            base = self._default_persona()
+
+        learned_path = ENTITY_DATA_DIR / "identity" / "persona_learned.json"
+        if learned_path.exists():
+            try:
+                learned = json.loads(learned_path.read_text(encoding="utf-8"))
+                base = self._merge_persona(base, learned)
+            except Exception as e:
+                print(f"⚠️ Error cargando persona_learned: {e}")
+        return base
+
+    def _merge_persona(self, base: dict, learned: dict) -> dict:
+        """Mergea persona_learned sobre persona base. Inmutables ignorados."""
+        INMUTABLES = {"name", "description", "mito_fundacional", "backstory"}
+        result = dict(base)
+        for key, value in learned.items():
+            if key.startswith("_"):
+                continue
+            if key in INMUTABLES:
+                continue
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = {**result[key], **value}
+            elif isinstance(value, list) and isinstance(result.get(key), list):
+                seen = {str(x) for x in result[key]}
+                result[key] = result[key] + [x for x in value if str(x) not in seen]
+            else:
+                result[key] = value
+        return result
 
     def _default_persona(self) -> dict:
         return {
@@ -214,40 +248,51 @@ class CognitiveLoop:
     def _deferred_post_process(self, message: str, response: str, analysis: dict, cognitive_state, now):
         """Consolidación diferida asíncrona (Hipocampo). No bloquea la respuesta."""
         try:
-            # 1. Post-procesamiento original (percepción, estado, memoria)
+            # 1. Post-procesamiento original (percepción, estado base, memoria)
             self._post_process(message, response, analysis, cognitive_state, now)
 
-            # 2. Actualizar grafo (NetworkX PageRank)
-            # self.flow_manager.stream._auto_link_all()
-
-            # 3. Actualizar estrés cognitivo para el Mediador Talámico
+            # 2. Actualizar grafo y estrés (como ya tienes)
             if hasattr(self.flow_manager, '_get_context_entropy'):
                 entropy = self.flow_manager._get_context_entropy()
                 stress = 1.0 - entropy
                 self.flow_manager.llm.set_cognitive_stress(stress)
 
             self._update_short_term_history(message, response)
+
+            # ========================================================
+            # 3. Evaluación de feedback y estado emocional (Appraisal)
+            # ========================================================
+            # A) Evaluar si hubo refuerzo (positivo o negativo)
             outcome = self.evaluate_conversational_outcome(message, response)
+            
+            # B) Evaluar el estado emocional contextual (vmPFC)
+            # Usamos el resumen de los pensamientos internos activos
+            internal_thoughts = self.flow_manager.stream.get_all_active_summary()
+            appraisal = self.evaluate_emotional_state(message, response, internal_thoughts)
+            
+            # C) Aplicar el outcome y el appraisal al SelfMemory
+            self.self_memory.adjust_state(
+                user_message=message, 
+                assistant_response=response,
+                outcome=outcome, 
+                appraisal=appraisal
+            )
+            # ========================================================
+
+            # 4. Consolidar aprendizaje conversacional (ChromaDB)
             self.consolidate_conversational_learning(message, response, outcome)
 
-            # Disparar fine-tuning cada 20 interacciones
-            if self.interaction_count > 0 and self.interaction_count % 20 == 0:
-                import subprocess
-                from pathlib import Path
-                from config import MODEL_PATH
-                
+            # 5. Promoción de normas sociales (cada 10 interacciones)
+            if self.interaction_count > 0 and self.interaction_count % 10 == 0:
                 persona = self.load_persona()
-                entity_name = persona.get("name", "unknown")
-                training_dir = self.flow_manager.ENTITY_DATA_DIR / "training" if hasattr(self.flow_manager, 'ENTITY_DATA_DIR') else ENTITY_DATA_DIR / "training"
-                data_path = training_dir / "training_data.jsonl"
-                output_path = Path("models") / f"{entity_name}_v{self.interaction_count}.gguf"
-                base_model = str(MODEL_PATH)
-                
-                print(f"   [FineTune] Iniciando fine-tuning para {entity_name}...")
-                subprocess.Popen([
-                    "python", "scripts/finetune.py",
-                    entity_name, base_model, str(data_path), str(output_path)
-                ])
+                forbidden = persona.get("validation_rules", {}).get("forbidden_patterns", [])
+                state = self.self_memory.load_state()
+                confianza_actual = state.get("relacion_con_usuario", {}).get("confianza", 0.5)
+                self.social_learning.promote_candidates(
+                    forbidden_patterns=forbidden, 
+                    current_user_confidence=confianza_actual
+                )
+                self.social_learning.cleanup()
 
         except Exception as e:
             print(f"⚠️ Error en post-procesamiento diferido: {e}")
@@ -278,16 +323,19 @@ class CognitiveLoop:
         if len(response) < 80:
             return False
 
-        if self._is_anomaly(response):
-            print("⚠️ Anomalía detectada. Post-procesos omitidos.")
-            return
-
         try:
             self.user_memory.update_profile(message, analysis)
             self._update_user_perception(message, analysis)
-            self.self_memory.adjust_state(message, response)
+            
+            # 1. Evaluar outcome ANTES de ajustar estado
+            outcome = self.evaluate_conversational_outcome(message, response)
+            
+            # 2. Ajustar estado usando el outcome (sube/baja confianza según intensidad)
+            self.self_memory.adjust_state(message, response, outcome=outcome)
+            
         except Exception as e:
             print(f"⚠️ Error en memorias: {e}")
+            outcome = {"outcome": "implicit_success", "feedback": "", "importance": 0.4}
 
         if (self.interaction_count % REFLECTION_INTERVAL == 0
                 or self._detect_important_moment(message, response)):
@@ -311,6 +359,23 @@ class CognitiveLoop:
 
         self._update_conversation_summary(message, response)
 
+        # Guardar instrucciones técnicas en memoria procedural
+        if analysis.get("intention") == "comando" or "json" in message.lower() or "código" in message.lower():
+            try:
+                self.episodic_memory.procedural_collection.add(
+                    documents=[f"Instrucción del usuario: {message}\nRespuesta generada: {response}"],
+                    metadatas=[{
+                        "source": "user_instruction",
+                        "type": "procedural_fragment",
+                        "importance": 0.8,
+                        "timestamp": datetime.now().isoformat()
+                    }],
+                    ids=[f"proc_{datetime.now().timestamp()}"]
+                )
+                print("   [Memoria] Instrucción técnica guardada en memoria procedural.")
+            except Exception as e:
+                print(f"   [!] Error guardando en memoria procedural: {e}")
+
         # Limpiar respuesta de bloques de formato antes de almacenar
         import re
         cleaned_response = re.sub(r'---\s*\w+\s*---', '', response)
@@ -323,10 +388,6 @@ class CognitiveLoop:
             print(f"⚠️ Error guardando en memoria episódica: {e}")
 
         print("🏁 Post-procesos completados")
-
-    def _is_anomaly(self, response: str) -> bool:
-        # Desactivado: la prevención de anomalías se maneja desde los prompts
-        return False
 
     def _detect_important_moment(self, message, response):
         prompt = f"""<system_identity>
@@ -593,46 +654,112 @@ Sé específico y personal. No repitas frases anteriores.
             pass
 
     def evaluate_conversational_outcome(self, user_message: str, assistant_response: str) -> dict:
-        """Analizador de Recompensa Conversacional basado en embeddings."""
+        """Analiza el feedback usando clasificador + LLM contextual."""
         try:
-            msg_emb = self.flow_manager.stream._get_embedding(user_message)
-            if msg_emb is None:
-                return {"outcome": "implicit_success", "feedback": "Sin señal.", "importance": 0.4}
-            
-            import numpy as np
-            msg_arr = np.array(msg_emb)
-            msg_norm = msg_arr / max(np.linalg.norm(msg_arr), 1e-8)
-            
-            # Vectores de sentimiento (multilingües)
-            positive_anchor = self.flow_manager.stream._get_embedding(
-                "excelente buen trabajo correcto gracias funciona perfecto bien hecho exactly great thanks perfect"
+            # 1. Clasificación rápida con GLiNER
+            label = self.flow_manager.interaction._classify(
+                f"Usuario: {user_message}\nAgente: {assistant_response}",
+                [
+                    "refuerzo positivo o agradecimiento por la respuesta",
+                    "corrección, queja o rechazo de la respuesta",
+                    "mensaje normal sin feedback claro"
+                ],
+                task_name="tipo_feedback"
             )
-            negative_anchor = self.flow_manager.stream._get_embedding(
-                "mal error no funciona equivocado incorrecto no sirve pésimo wrong bad incorrect"
-            )
+
+            if "positivo" in label or "agradecimiento" in label:
+                return self._extract_feedback_details(user_message, assistant_response, "positive")
+            elif "corrección" in label or "queja" in label or "rechazo" in label:
+                return self._extract_feedback_details(user_message, assistant_response, "negative")
             
-            if positive_anchor and negative_anchor:
-                pos_arr = np.array(positive_anchor)
-                neg_arr = np.array(negative_anchor)
-                pos_norm = pos_arr / max(np.linalg.norm(pos_arr), 1e-8)
-                neg_norm = neg_arr / max(np.linalg.norm(neg_arr), 1e-8)
-                
-                sim_positive = float(np.dot(msg_norm, pos_norm))
-                sim_negative = float(np.dot(msg_norm, neg_norm))
-                
-                if sim_negative > sim_positive and sim_negative > 0.5:
-                    return {"outcome": "prediction_error", "feedback": "El usuario rechazó la respuesta.", "importance": 0.7}
-                elif sim_positive > sim_negative and sim_positive > 0.5:
-                    return {"outcome": "success", "feedback": "Respuesta bien recibida.", "importance": 0.6}
-            
-            # Si no hay señal clara
-            is_correction = any(ind in user_message.lower() for ind in ["no es", "corrige", "en realidad"])
-            if is_correction:
-                return {"outcome": "prediction_error", "feedback": "Corrección detectada.", "importance": 0.7}
-            
+            # Si es ambiguo o normal, no forzamos un outcome
             return {"outcome": "implicit_success", "feedback": "Continuidad sin señal clara.", "importance": 0.4}
-        except Exception:
+
+        except Exception as e:
+            print(f"   [!] Error evaluando outcome: {e}")
             return {"outcome": "implicit_success", "feedback": "Error en evaluación.", "importance": 0.4}
+
+    def _extract_feedback_details(self, user_message: str, assistant_response: str, feedback_type: str) -> dict:
+        """Usa el LLM para entender QUÉ se está reforzando y CON QUÉ intensidad."""
+        
+        prompt = f"""Analiza el siguiente intercambio.
+Mensaje del usuario: "{user_message}"
+Respuesta del agente: "{assistant_response}"
+
+El clasificador ha detectado un feedback {feedback_type.upper()}.
+Extrae la esencia de este feedback. Responde SOLO con un JSON válido:
+{{
+  "comportamiento_reforzado": "descripción breve del comportamiento que el usuario aprueba o rechaza (ej. 'ser directo', 'hacer preguntas', 'reformular la pregunta')",
+  "intensidad": 0.0,
+  "razon": "por qué el usuario reaccionó así"
+}}
+La intensidad debe ser un número entre 0.1 (sutil) y 1.0 (muy fuerte o explícito)."""
+
+        try:
+            result = self.flow_manager.llm.generate(prompt, temperature=0.1, max_tokens=150, purpose="evaluar_feedback")
+            import re, json
+            match = re.search(r'\{.*\}', result, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                comportamiento = data.get("comportamiento_reforzado", "")
+                intensidad = float(data.get("intensidad", 0.5))
+                
+                # Guardar como evidencia social para el aprendizaje
+                if comportamiento:
+                    valence = intensidad if feedback_type == "positive" else -intensidad
+                    tipo_evidencia = "norma_positiva" if feedback_type == "positive" else "prohibicion"
+                    
+                    self.social_learning.register_evidence(
+                        texto_original=user_message,
+                        user_id=self.user_id,
+                        session_id=self.user_id,
+                        tipo=tipo_evidencia,
+                        valence=valence,
+                        texto_canonico=comportamiento
+                    )
+                
+                return {
+                    "outcome": "success" if feedback_type == "positive" else "prediction_error",
+                    "feedback": data.get("razon", ""),
+                    "importance": intensidad,
+                    "comportamiento": comportamiento
+                }
+        except Exception:
+            pass
+        
+        # Fallback si el LLM falla
+        return {"outcome": "success" if feedback_type == "positive" else "prediction_error", "feedback": "", "importance": 0.5}
+    
+    def _register_social_evidence(self, user_message: str, assistant_response: str, tipo: str, valence: float):
+        """Extrae el comportamiento reforzado y lo registra en social_learning."""
+        try:
+            prompt = f"""El usuario reaccionó a esta respuesta tuya.
+    Mensaje del usuario: "{user_message[:200]}"
+    Tu respuesta anterior: "{assistant_response[:200]}"
+
+    ¿Qué comportamiento de tu respuesta fue reforzado o rechazado? Responde JSON:
+    {{"comportamiento": "descripción breve del comportamiento", "texto_canonico": "forma normalizada del comportamiento (ej: 'hacer preguntas curiosas')"}}
+    Si no hay un comportamiento claro, responde {{"comportamiento": null}}."""
+            result = self.flow_manager.llm.generate(prompt, temperature=0.1, max_tokens=80, purpose="inferir_norma")
+            import re as _re, json as _json
+            match = _re.search(r'\{.*\}', result, _re.DOTALL)
+            if not match:
+                return
+            data = _json.loads(match.group(0))
+            comportamiento = data.get("comportamiento")
+            texto_canonico = data.get("texto_canonico") or comportamiento
+            if not comportamiento or not texto_canonico:
+                return
+            self.social_learning.register_evidence(
+                texto_original=comportamiento,
+                user_id=self.user_id,
+                session_id=self.user_id,
+                tipo=tipo,
+                valence=valence,
+                texto_canonico=texto_canonico,
+            )
+        except Exception:
+            pass
 
     def consolidate_conversational_learning(self, user_message: str, assistant_response: str, outcome: dict):
         """Consolida aprendizaje conversacional. Solo éxitos van a ChromaDB."""
@@ -757,3 +884,27 @@ Sé específico y personal. No repitas frases anteriores.
                         return
         except Exception as e:
             print(f"   [!] Error en destilación: {e}")
+
+    def evaluate_emotional_state(self, user_msg: str, agent_resp: str, internal_thoughts: str) -> dict:
+        prompt = f"""Eres el módulo de evaluación cognitiva (vmPFC) de una entidad artificial.
+    Tu trabajo es determinar cómo los siguientes eventos afectan su estado interno.
+
+    [ESTADO INTERNO PREVIO]
+    {internal_thoughts[:500]}
+
+    [EVENTO: INTERACCIÓN]
+    Usuario dijo: "{user_msg}"
+    Agente respondió: "{agent_resp}"
+
+    [DIRECTIVA]
+    Evalúa el impacto emocional en el agente según la teoría de evaluación cognitiva.
+    Responde en JSON exacto:
+    {{
+    "emocion": "una palabra (ej. serena, cautelosa, frustrada, curiosa, satisfecha)",
+    "intensidad": 0.0 a 1.0,
+    "razon_evaluacion": "por qué el agente se siente así según el contexto",
+    "impacto_en_confianza": -0.1 a 0.1
+    }}"""
+
+        result = self.flow_manager.llm.generate(prompt, temperature=0.1, max_tokens=150, purpose="evaluacion_emocional")
+        # Parsear JSON y devolver
